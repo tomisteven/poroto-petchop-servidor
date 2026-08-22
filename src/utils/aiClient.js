@@ -257,11 +257,10 @@ const buscarEnInternet = async ({ producto, referencia }) => {
       input: [
         {
           role: 'system',
-          content: 'Sos un asistente que busca información en internet y responde con JSON válido.',
+          content: 'Sos un asistente que busca información en internet. Respondé EXCLUSIVAMENTE con JSON válido, sin texto adicional antes o después.',
         },
         { role: 'user', content: prompt },
       ],
-      text: { format: { type: 'json_object' } },
       temperature: 0.5,
     }),
   });
