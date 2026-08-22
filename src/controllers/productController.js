@@ -58,19 +58,27 @@ const createProduct = async (req, res) => {
     const {
       nombre, descripcion, sku, categoria, precioCompra, precioVenta,
       stock, stockMinimo, unidadMedida, proveedor, imagen,
-      esBolsaAlimento, kilosPorBolsa, precioKilo, margenSuelto, esGenerico
+      esBolsaAlimento, kilosPorBolsa, precioKilo, margenSuelto, esGenerico, notasIA
     } = req.body;
 
-    const productExists = await Product.findOne({ sku });
-    if (productExists) {
-      return res.status(400).json({ message: 'El SKU ya está en uso' });
+    let finalSku = sku;
+    if (!finalSku) {
+      finalSku = await Product.generarSKU(nombre, false);
+    } else {
+      const productExists = await Product.findOne({ sku: finalSku });
+      if (productExists) {
+        return res.status(400).json({ message: 'El SKU ya está en uso' });
+      }
     }
 
-    const product = await Product.create({
-      nombre, descripcion, sku, categoria, precioCompra, precioVenta,
+    const productData = {
+      nombre, descripcion, categoria, precioCompra, precioVenta,
       stock: stock || 0, stockMinimo, unidadMedida, proveedor, imagen,
-      esBolsaAlimento, kilosPorBolsa, precioKilo, margenSuelto, esGenerico
-    });
+      esBolsaAlimento, kilosPorBolsa, precioKilo, margenSuelto, esGenerico, notasIA,
+      sku: finalSku,
+    };
+
+    const product = await Product.create(productData);
 
     if (stock > 0) {
       await StockMovement.create({
@@ -113,6 +121,7 @@ const updateProduct = async (req, res) => {
       if (req.body.precioKilo !== undefined) product.precioKilo = req.body.precioKilo;
       if (req.body.margenSuelto !== undefined) product.margenSuelto = req.body.margenSuelto;
       if (req.body.esGenerico !== undefined) product.esGenerico = req.body.esGenerico;
+      if (req.body.notasIA !== undefined) product.notasIA = req.body.notasIA;
 
       if (req.body.stock !== undefined && Number(req.body.stock) !== product.stock) {
         const stockAnterior = product.stock;

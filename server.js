@@ -27,6 +27,10 @@ const promotionRoutes = require('./src/routes/promotionRoutes');
 const recommendationRoutes = require('./src/routes/recommendationRoutes');
 const calendarRoutes = require('./src/routes/calendarRoutes');
 const loyaltyRoutes = require('./src/routes/loyaltyRoutes');
+const aiHistoryRoutes = require('./src/routes/aiHistoryRoutes');
+const orderRoutes = require('./src/routes/orderRoutes');
+const aiFeaturesRoutes = require('./src/routes/aiFeaturesRoutes');
+const aiFeatureHistoryRoutes = require('./src/routes/aiFeatureHistoryRoutes');
 
 // Conectar a Base de Datos
 connectDB();
@@ -71,6 +75,10 @@ app.use('/api/promotions', promotionRoutes);
 app.use('/api/recommendations', recommendationRoutes);
 app.use('/api/calendar', calendarRoutes);
 app.use('/api/loyalty', loyaltyRoutes);
+app.use('/api/ai-history', aiHistoryRoutes);
+app.use('/api/orders', orderRoutes);
+app.use('/api/ai-features', aiFeaturesRoutes);
+app.use('/api/ai-features-history', aiFeatureHistoryRoutes);
 
 app.get('/', (req, res) => {
   res.send('API del Kiosco funcionando...');

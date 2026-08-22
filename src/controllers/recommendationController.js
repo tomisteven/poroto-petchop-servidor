@@ -1,5 +1,5 @@
 const Product = require('../models/Product');
-const { generarRecomendaciones, compararProductos, buscarEnInternet } = require('../utils/aiClient');
+const { generarRecomendaciones, compararProductos, buscarEnInternet, generarDescripcion } = require('../utils/aiClient');
 
 const normalize = (s = '') =>
   s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
@@ -200,10 +200,95 @@ const recommendWeb = async (req, res) => {
       referencia: (referencia || '').trim(),
     });
 
+    const catalogo = await Product.find({ activo: true })
+      .populate('categoria', 'nombre')
+      .select('nombre sku categoria precioVenta precioCompra stock stockMinimo unidadMedida descripcion esBolsaAlimento kilosPorBolsa imagen');
+
+    const buscarEnCatalogo = (nombreProducto) => {
+      if (!nombreProducto) return null;
+      const normalizado = normalize(nombreProducto);
+      const tokens = normalizado.split(/\s+/).filter((t) => t.length > 2);
+
+      let mejorMatch = null;
+      let mejorScore = 0;
+
+      for (const p of catalogo) {
+        const textoProd = normalize(`${p.nombre} ${p.descripcion || ''} ${p.categoria?.nombre || ''} ${p.sku}`);
+        let score = 0;
+        for (const t of tokens) {
+          if (textoProd.includes(t)) score++;
+        }
+        if (score > mejorScore) {
+          mejorScore = score;
+          mejorMatch = p;
+        }
+      }
+
+      return mejorScore >= 2 ? mejorMatch : null;
+    };
+
+    if (data.recomendaciones) {
+      data.recomendaciones = data.recomendaciones.map((r) => {
+        const local = buscarEnCatalogo(r.producto || r.nombre);
+        return {
+          ...r,
+          enStock: !!local,
+          productoLocal: local ? {
+            _id: local._id,
+            nombre: local.nombre,
+            sku: local.sku,
+            precioVenta: local.precioVenta,
+            stock: local.stock,
+            imagen: local.imagen,
+          } : null,
+        };
+      });
+    }
+
+    if (data.comparaciones) {
+      data.comparaciones = data.comparaciones.map((c) => {
+        const local = buscarEnCatalogo(c.producto);
+        return {
+          ...c,
+          enStock: !!local,
+          productoLocal: local ? {
+            _id: local._id,
+            nombre: local.nombre,
+            sku: local.sku,
+            precioVenta: local.precioVenta,
+            stock: local.stock,
+            imagen: local.imagen,
+          } : null,
+        };
+      });
+    }
+
     res.json({ producto: producto.trim(), referencia: (referencia || '').trim(), ...data });
   } catch (error) {
     res.status(400).json({ message: error.message });
   }
 };
 
-module.exports = { recommendProducts, compareProducts, recommendWeb };
+// @desc    Generar descripción de producto con IA buscando en internet
+// @route   POST /api/recommendations/generate-description
+// @access  Private
+const generateDescription = async (req, res) => {
+  try {
+    const { nombre, notas } = req.body;
+
+    if (!nombre || !nombre.trim()) {
+      return res.status(400).json({ message: 'Indique el nombre del producto' });
+    }
+
+    const descripcion = await generarDescripcion({
+      nombre: nombre.trim(),
+      notas: (notas || '').trim(),
+    });
+
+    res.json({ descripcion });
+  } catch (error) {
+    res.status(400).json({ message: error.message });
+  }
+};
+
+module.exports = { recommendProducts, compareProducts, recommendWeb, generateDescription };

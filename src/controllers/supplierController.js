@@ -4,7 +4,7 @@ const getSuppliers = async (req, res) => {
   try {
     const { all } = req.query;
     const filter = all ? {} : { activo: true };
-    const suppliers = await Supplier.find(filter).sort({ nombre: 1 });
+    const suppliers = await Supplier.find(filter).populate('productos', 'nombre precioVenta unidadMedida').sort({ nombre: 1 });
     res.json(suppliers);
   } catch (error) {
     res.status(500).json({ message: 'Error al obtener proveedores' });
@@ -13,7 +13,7 @@ const getSuppliers = async (req, res) => {
 
 const getSupplier = async (req, res) => {
   try {
-    const supplier = await Supplier.findById(req.params.id);
+    const supplier = await Supplier.findById(req.params.id).populate('productos', 'nombre precioVenta unidadMedida');
     if (!supplier) return res.status(404).json({ message: 'Proveedor no encontrado' });
     res.json(supplier);
   } catch (error) {

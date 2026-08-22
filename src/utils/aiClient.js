@@ -257,7 +257,7 @@ const buscarEnInternet = async ({ producto, referencia }) => {
       input: [
         {
           role: 'system',
-          content: 'Sos un asistente que busca información en internet. Respondé EXCLUSIVAMENTE con JSON válido, sin texto adicional antes o después.',
+          content: 'Sos un asistente que busca información en internet. Respondé SOLO con el objeto JSON, sin backticks, sin "json", sin texto antes ni después. Solo el JSON crudo.',
         },
         { role: 'user', content: prompt },
       ],
@@ -291,14 +291,120 @@ const buscarEnInternet = async ({ producto, referencia }) => {
     .filter((a) => a.type === 'url_citation')
     .map((a) => ({ titulo: a.title || a.url, url: a.url }));
 
+  let cleaned = messageText.trim();
+  const fenceMatch = cleaned.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
+  if (fenceMatch) {
+    cleaned = fenceMatch[1].trim();
+  }
+
   let parsed;
   try {
-    parsed = JSON.parse(messageText);
+    parsed = JSON.parse(cleaned);
   } catch (e) {
-    parsed = { resumen: messageText, comparaciones: [], recomendaciones: [], notas: '' };
+    const start = cleaned.indexOf('{');
+    const end = cleaned.lastIndexOf('}');
+    if (start !== -1 && end > start) {
+      try {
+        parsed = JSON.parse(cleaned.slice(start, end + 1));
+      } catch (e2) {
+        parsed = { resumen: cleaned, comparaciones: [], recomendaciones: [], notas: '' };
+      }
+    } else {
+      parsed = { resumen: cleaned, comparaciones: [], recomendaciones: [], notas: '' };
+    }
   }
 
   return { ...parsed, fuentes };
+};
+
+// ---------- GENERACIÓN DE DESCRIPCIÓN DE PRODUCTO ----------
+
+const generarDescripcion = async ({ nombre, notas }) => {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new Error('OPENAI_API_KEY no está configurada en el servidor');
+  }
+
+  const modelo = process.env.OPENAI_WEB_MODEL || 'gpt-4o-mini';
+  const prompt = [
+    `Necesito una descripción detallada y atractiva para este producto de una tienda de mascotas/kiosco en Argentina: "${nombre}"`,
+    notas ? `\nNotas o aclaraciones del vendedor: "${notas}"` : '',
+    '',
+    'Buscá en internet información real sobre este producto: marca, composición, beneficios, presentación, tipo de mascota adecuada, etc.',
+    '',
+    'La descripción debe:',
+    '- Ser en español rioplatense',
+    '- Tener entre 2 y 4 oraciones',
+    '- Incluir composición, beneficios y para qué tipo de mascota es ideal',
+    '- Mencionar marca si es conocida',
+    '- Ser útil para que el vendedor la copie al catálogo de la tienda',
+    '',
+    'Respondé SOLO con el objeto JSON, sin backticks, sin "json", sin texto antes ni después. Solo el JSON crudo.',
+    '{ "descripcion": "..." }',
+  ].filter(Boolean).join('\n');
+
+  const response = await fetch(OPENAI_RESPONSES_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: modelo,
+      tools: [{ type: 'web_search' }],
+      input: [
+        {
+          role: 'system',
+          content: 'Sos un experto en productos para mascotas. Respondé SOLO con el objeto JSON, sin backticks, sin texto antes ni después.',
+        },
+        { role: 'user', content: prompt },
+      ],
+      temperature: 0.5,
+    }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Error de OpenAI (${response.status}): ${text.slice(0, 500)}`);
+  }
+
+  const data = await response.json();
+
+  const messageText = (data?.output || [])
+    .filter((o) => o.type === 'message')
+    .flatMap((m) => m.content || [])
+    .filter((c) => c.text)
+    .map((c) => c.text)
+    .join('\n');
+
+  if (!messageText) {
+    throw new Error('OpenAI no devolvió contenido');
+  }
+
+  let cleaned = messageText.trim();
+  const fenceMatch = cleaned.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
+  if (fenceMatch) {
+    cleaned = fenceMatch[1].trim();
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch (e) {
+    const start = cleaned.indexOf('{');
+    const end = cleaned.lastIndexOf('}');
+    if (start !== -1 && end > start) {
+      try {
+        parsed = JSON.parse(cleaned.slice(start, end + 1));
+      } catch (e2) {
+        parsed = { descripcion: cleaned };
+      }
+    } else {
+      parsed = { descripcion: cleaned };
+    }
+  }
+
+  return parsed.descripcion || cleaned;
 };
 
 module.exports = {
@@ -307,4 +413,5 @@ module.exports = {
   generarRecomendaciones,
   compararProductos,
   buscarEnInternet,
+  generarDescripcion,
 };

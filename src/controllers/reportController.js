@@ -1,6 +1,7 @@
  const mongoose = require('mongoose');
 const Sale = require('../models/Sale');
 const Product = require('../models/Product');
+const Expense = require('../models/Expense');
 
 // Helper para obtener el inicio del día en Argentina (UTC-3)
 const getArgStartOfDay = (date = new Date()) => {
@@ -639,6 +640,186 @@ const getSalesHeatmap = async (req, res) => {
   }
 };
 
+// @desc    Cierre de caja del día (ventas por método de pago + gastos)
+// @route   GET /api/reports/cash-close
+const getCashClose = async (req, res) => {
+  try {
+    const { date } = req.query;
+    const start = date
+      ? new Date(Date.UTC(...date.split('-').map(Number), 3, 0, 0, 0))
+      : getArgStartOfDay();
+    const end = new Date(start.getTime() + 24 * 60 * 60 * 1000 - 1);
+
+    const ventas = await Sale.aggregate([
+      { $match: { fecha: { $gte: start, $lte: end }, estado: 'completada' } },
+      { $unwind: '$items' },
+      {
+        $group: {
+          _id: '$_id',
+          totalFinal: { $first: '$totalFinal' },
+          metodoPago: { $first: '$metodoPago' },
+          montoPagado: { $first: '$montoPagado' },
+          vuelto: { $first: '$vuelto' },
+          costoVenta: { $sum: { $multiply: ['$items.precioCompraHisto', '$items.cantidad'] } }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          totalVentas: { $sum: 1 },
+          montoTotal: { $sum: '$totalFinal' },
+          costoTotal: { $sum: '$costoVenta' },
+          efectivo: { $sum: { $cond: [{ $eq: ['$metodoPago', 'efectivo'] }, '$totalFinal', 0] } },
+          tarjeta: { $sum: { $cond: [{ $eq: ['$metodoPago', 'tarjeta'] }, '$totalFinal', 0] } },
+          transferencia: { $sum: { $cond: [{ $eq: ['$metodoPago', 'transferencia'] }, '$totalFinal', 0] } },
+          efectivoPagado: { $sum: { $cond: [{ $eq: ['$metodoPago', 'efectivo'] }, { $ifNull: ['$montoPagado', '$totalFinal'] }, 0] } },
+          efectivoVuelto: { $sum: { $cond: [{ $eq: ['$metodoPago', 'efectivo'] }, { $ifNull: ['$vuelto', 0] }, 0] } }
+        }
+      }
+    ]);
+
+    const v = ventas[0] || { totalVentas: 0, montoTotal: 0, costoTotal: 0, efectivo: 0, tarjeta: 0, transferencia: 0, efectivoPagado: 0, efectivoVuelto: 0 };
+
+    const gastos = await Expense.aggregate([
+      { $match: { fecha: { $gte: start, $lte: end } } },
+      {
+        $group: {
+          _id: '$categoria',
+          total: { $sum: '$monto' },
+          cantidad: { $sum: 1 }
+        }
+      },
+      { $sort: { total: -1 } }
+    ]);
+
+    const totalGastos = gastos.reduce((acc, g) => acc + g.total, 0);
+    const gananciaBruta = v.montoTotal - v.costoTotal;
+    const balanceNeto = gananciaBruta - totalGastos;
+    const efectivoEnCaja = v.efectivoPagado - v.efectivoVuelto;
+
+    res.json({
+      fecha: start,
+      ventas: {
+        total: v.totalVentas,
+        montoTotal: v.montoTotal,
+        costoTotal: v.costoTotal,
+        efectivo: v.efectivo,
+        tarjeta: v.tarjeta,
+        transferencia: v.transferencia,
+        efectivoEnCaja,
+      },
+      gastos: {
+        total: totalGastos,
+        porCategoria: gastos,
+      },
+      gananciaBruta,
+      balanceNeto,
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Error al generar cierre de caja' });
+  }
+};
+
+// @desc    Flujo de caja mensual (ventas - gastos por día)
+// @route   GET /api/reports/cash-flow
+const getCashFlow = async (req, res) => {
+  try {
+    const { year, month } = req.query;
+    const now = new Date();
+    const y = year ? parseInt(year) : parseInt(now.toLocaleDateString('en-CA', { timeZone: 'America/Argentina/Buenos_Aires' }).split('-')[0]);
+    const m = month ? parseInt(month) - 1 : parseInt(now.toLocaleDateString('en-CA', { timeZone: 'America/Argentina/Buenos_Aires' }).split('-')[1]) - 1;
+
+    const start = new Date(Date.UTC(y, m, 1, 3, 0, 0, 0));
+    const end = new Date(Date.UTC(y, m + 1, 0, 23, 59, 59, 999) + 3 * 3600 * 1000);
+
+    const ventasPorDia = await Sale.aggregate([
+      { $match: { fecha: { $gte: start, $lte: end }, estado: 'completada' } },
+      { $unwind: '$items' },
+      {
+        $group: {
+          _id: '$_id',
+          fecha: { $first: '$fecha' },
+          totalFinal: { $first: '$totalFinal' },
+          metodoPago: { $first: '$metodoPago' },
+          costoVenta: { $sum: { $multiply: ['$items.precioCompraHisto', '$items.cantidad'] } }
+        }
+      },
+      {
+        $group: {
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$fecha', timezone: 'America/Argentina/Buenos_Aires' } },
+          ventas: { $sum: 1 },
+          ingresos: { $sum: '$totalFinal' },
+          costoVentas: { $sum: '$costoVenta' },
+          efectivo: { $sum: { $cond: [{ $eq: ['$metodoPago', 'efectivo'] }, '$totalFinal', 0] } },
+          tarjeta: { $sum: { $cond: [{ $eq: ['$metodoPago', 'tarjeta'] }, '$totalFinal', 0] } },
+          transferencia: { $sum: { $cond: [{ $eq: ['$metodoPago', 'transferencia'] }, '$totalFinal', 0] } }
+        }
+      },
+      { $sort: { _id: 1 } }
+    ]);
+
+    const gastosPorDia = await Expense.aggregate([
+      { $match: { fecha: { $gte: start, $lte: end } } },
+      {
+        $group: {
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$fecha', timezone: 'America/Argentina/Buenos_Aires' } },
+          gastos: { $sum: '$monto' },
+          cantidad: { $sum: 1 }
+        }
+      }
+    ]);
+
+    const gastosMap = {};
+    gastosPorDia.forEach((g) => { gastosMap[g._id] = g.gastos; });
+
+    const daysInMonth = new Date(y, m + 1, 0).getDate();
+    const dias = [];
+    let totalIngresos = 0;
+    let totalGastos = 0;
+    let totalVentas = 0;
+
+    for (let d = 1; d <= daysInMonth; d++) {
+      const key = `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      const venta = ventasPorDia.find((v) => v._id === key);
+      const gasto = gastosMap[key] || 0;
+      const ingresos = venta?.ingresos || 0;
+      const costoVentas = venta?.costoVentas || 0;
+      const ganancia = ingresos - costoVentas;
+      const balance = ganancia - gasto;
+
+      totalIngresos += ingresos;
+      totalGastos += gasto;
+      totalVentas += venta?.ventas || 0;
+
+      dias.push({
+        fecha: key,
+        ventas: venta?.ventas || 0,
+        ingresos,
+        costoVentas,
+        ganancia,
+        gastos: gasto,
+        balance,
+        efectivo: venta?.efectivo || 0,
+        tarjeta: venta?.tarjeta || 0,
+        transferencia: venta?.transferencia || 0,
+      });
+    }
+
+    res.json({
+      periodo: { year: y, month: m + 1, inicio: start, fin: end },
+      totales: {
+        ingresos: totalIngresos,
+        gastos: totalGastos,
+        ganancia: totalIngresos - totalGastos,
+        ventas: totalVentas,
+      },
+      dias,
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Error al generar flujo de caja' });
+  }
+};
+
 module.exports = {
   getDailyReport,
   getWeeklyReport,
@@ -648,5 +829,7 @@ module.exports = {
   getDashboardSummary,
   getGlobalStats,
   getSalesStats,
-  getSalesHeatmap
+  getSalesHeatmap,
+  getCashClose,
+  getCashFlow,
 };

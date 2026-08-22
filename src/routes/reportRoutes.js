@@ -9,7 +9,9 @@ const {
   getDashboardSummary,
   getGlobalStats,
   getSalesStats,
-  getSalesHeatmap
+  getSalesHeatmap,
+  getCashClose,
+  getCashFlow,
 } = require('../controllers/reportController');
 const { protect, admin } = require('../middlewares/auth');
 
@@ -22,5 +24,7 @@ router.get('/summary', protect, getDashboardSummary);
 router.get('/global-stats', protect, getGlobalStats);
 router.get('/sales-stats', protect, getSalesStats);
 router.get('/sales-heatmap', protect, getSalesHeatmap);
+router.get('/cash-close', protect, getCashClose);
+router.get('/cash-flow', protect, getCashFlow);
 
 module.exports = router;
