@@ -47,6 +47,28 @@ const createPurchaseOrder = async (req, res) => {
   }
 };
 
+const updatePurchaseOrder = async (req, res) => {
+  try {
+    const order = await PurchaseOrder.findById(req.params.id);
+    if (!order) return res.status(404).json({ message: 'Orden no encontrada' });
+    if (order.estado !== 'pendiente') return res.status(400).json({ message: 'Solo órdenes pendientes pueden editarse' });
+
+    const { proveedor, items, notas } = req.body;
+    if (items) {
+      order.items = items;
+      order.total = items.reduce((sum, i) => sum + (i.cantidad * i.precioUnitario), 0);
+    }
+    if (proveedor !== undefined) order.proveedor = proveedor || undefined;
+    if (notas !== undefined) order.notas = notas;
+
+    await order.save();
+    const populated = await order.populate('proveedor', 'nombre');
+    res.json(populated);
+  } catch (error) {
+    res.status(500).json({ message: 'Error al actualizar orden' });
+  }
+};
+
 const receivePurchaseOrder = async (req, res) => {
   try {
     const order = await PurchaseOrder.findById(req.params.id);
@@ -77,4 +99,4 @@ const cancelPurchaseOrder = async (req, res) => {
   }
 };
 
-module.exports = { getPurchaseOrders, getPurchaseOrder, createPurchaseOrder, receivePurchaseOrder, cancelPurchaseOrder };
+module.exports = { getPurchaseOrders, getPurchaseOrder, createPurchaseOrder, updatePurchaseOrder, receivePurchaseOrder, cancelPurchaseOrder };

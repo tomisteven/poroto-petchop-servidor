@@ -31,6 +31,7 @@ const aiHistoryRoutes = require('./src/routes/aiHistoryRoutes');
 const orderRoutes = require('./src/routes/orderRoutes');
 const aiFeaturesRoutes = require('./src/routes/aiFeaturesRoutes');
 const aiFeatureHistoryRoutes = require('./src/routes/aiFeatureHistoryRoutes');
+const investmentRoutes = require('./src/routes/investmentRoutes');
 
 // Conectar a Base de Datos
 connectDB();
@@ -79,6 +80,7 @@ app.use('/api/ai-history', aiHistoryRoutes);
 app.use('/api/orders', orderRoutes);
 app.use('/api/ai-features', aiFeaturesRoutes);
 app.use('/api/ai-features-history', aiFeatureHistoryRoutes);
+app.use('/api/investments', investmentRoutes);
 
 app.get('/', (req, res) => {
   res.send('API del Kiosco funcionando...');

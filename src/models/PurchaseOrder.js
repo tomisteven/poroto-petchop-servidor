@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 
 const purchaseOrderSchema = new mongoose.Schema({
   numero: { type: String, required: true, unique: true },
-  proveedor: { type: mongoose.Schema.Types.ObjectId, ref: 'Supplier', required: true },
+  proveedor: { type: mongoose.Schema.Types.ObjectId, ref: 'Supplier' },
   fecha: { type: Date, default: Date.now },
   items: [{
     producto: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
