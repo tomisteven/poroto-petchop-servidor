@@ -332,10 +332,19 @@ const getDashboardSummary = async (req, res) => {
 
     const mStats = monthlyStats[0] || { totalVentas: 0, montoTotal: 0, costoTotal: 0 };
 
+    // Gastos de hoy (se descuentan del ticket de facturacion)
+    const gastosHoyAgg = await Expense.aggregate([
+      { $match: { fecha: { $gte: todayStart } } },
+      { $group: { _id: null, total: { $sum: '$monto' } } }
+    ]);
+    const gastosHoy = gastosHoyAgg[0]?.total || 0;
+
     res.json({
       ventasHoy: stats.totalVentas,
       facturacionHoy: stats.montoTotal,
       gananciaHoy,
+      gastosHoy,
+      facturacionNetaHoy: stats.montoTotal - gastosHoy,
       topProducts: topToday,
       ventasPorHora,
       mes: {
@@ -820,6 +829,124 @@ const getCashFlow = async (req, res) => {
   }
 };
 
+// @desc    Estadísticas extra para el Dashboard (histórico, gastos, reposición)
+// @route   GET /api/reports/dashboard-extra
+const getDashboardExtra = async (req, res) => {
+  try {
+    const now = new Date();
+    const argStr = now.toLocaleDateString('en-CA', { timeZone: 'America/Argentina/Buenos_Aires' });
+    const [currentY, currentM] = argStr.split('-').map(Number);
+
+    const start12 = new Date(Date.UTC(currentY, currentM - 13, 1, 3, 0, 0, 0));
+
+    const [monthlySales, monthlyExpenses] = await Promise.all([
+      Sale.aggregate([
+        { $match: { fecha: { $gte: start12 }, estado: 'completada' } },
+        { $unwind: '$items' },
+        {
+          $group: {
+            _id: '$_id',
+            totalFinal: { $first: '$totalFinal' },
+            fecha: { $first: '$fecha' },
+            costoVenta: { $sum: { $multiply: ['$items.precioCompraHisto', '$items.cantidad'] } }
+          }
+        },
+        {
+          $group: {
+            _id: { $dateToString: { format: '%Y-%m', date: '$fecha', timezone: 'America/Argentina/Buenos_Aires' } },
+            facturacion: { $sum: '$totalFinal' },
+            costoVentas: { $sum: '$costoVenta' },
+            tickets: { $sum: 1 }
+          }
+        }
+      ]),
+      Expense.aggregate([
+        { $match: { fecha: { $gte: start12 } } },
+        {
+          $group: {
+            _id: { $dateToString: { format: '%Y-%m', date: '$fecha', timezone: 'America/Argentina/Buenos_Aires' } },
+            gastos: { $sum: '$monto' }
+          }
+        }
+      ])
+    ]);
+
+    const monthLabels = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+    const historico = [];
+    for (let i = 11; i >= 0; i--) {
+      const d = new Date(currentY, currentM - 1 - i, 1);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      const sale = monthlySales.find(s => s._id === key) || { facturacion: 0, costoVentas: 0, tickets: 0 };
+      const exp = monthlyExpenses.find(e => e._id === key) || { gastos: 0 };
+      historico.push({
+        mes: key,
+        nombre: monthLabels[d.getMonth()] + ' ' + String(d.getFullYear()).slice(2),
+        facturacion: sale.facturacion,
+        costoVentas: sale.costoVentas,
+        gananciaBruta: sale.facturacion - sale.costoVentas,
+        gastos: exp.gastos,
+        gananciaNeta: sale.facturacion - sale.costoVentas - exp.gastos,
+        tickets: sale.tickets
+      });
+    }
+
+    const monthStart = new Date(Date.UTC(currentY, currentM - 1, 1, 3, 0, 0, 0));
+    const currentMonthExpenses = await Expense.aggregate([
+      { $match: { fecha: { $gte: monthStart } } },
+      {
+        $group: {
+          _id: '$categoria',
+          total: { $sum: '$monto' },
+          cantidad: { $sum: 1 }
+        }
+      },
+      { $sort: { total: -1 } }
+    ]);
+
+    const lowStockProducts = await Product.find({
+      activo: true,
+      $expr: { $lte: ['$stock', '$stockMinimo'] }
+    }).select('nombre stock stockMinimo precioCompra unidadMedida')
+      .populate('categoria', 'nombre');
+
+    const restockingCost = lowStockProducts.reduce((acc, p) => {
+      const needed = Math.max(0, p.stockMinimo - p.stock);
+      return acc + (needed * p.precioCompra);
+    }, 0);
+
+    const dayOfMonth = parseInt(argStr.split('-')[2]);
+    const daysInMonth = new Date(currentY, currentM, 0).getDate();
+    const currentMonthData = historico[historico.length - 1] || { facturacion: 0, gastos: 0, gananciaBruta: 0, gananciaNeta: 0 };
+    const prevMonthData = historico.length >= 2 ? historico[historico.length - 2] : { facturacion: 0 };
+    const avgDailyBilling = dayOfMonth > 0 ? currentMonthData.facturacion / dayOfMonth : 0;
+    const projectedBilling = avgDailyBilling * daysInMonth;
+
+    res.json({
+      historicoMensual: historico,
+      mesActual: {
+        gastosPorCategoria: currentMonthExpenses,
+        gastosTotal: currentMonthExpenses.reduce((acc, e) => acc + e.total, 0),
+        diaDelMes: dayOfMonth,
+        diasEnMes: daysInMonth,
+        facturacion: currentMonthData.facturacion,
+        gananciaBruta: currentMonthData.gananciaBruta,
+        gananciaNeta: currentMonthData.gananciaNeta,
+        promedioDiario: avgDailyBilling,
+        proyeccionFinMes: projectedBilling,
+        facturacionMesAnterior: prevMonthData.facturacion,
+      },
+      reposicionMercaderia: {
+        productosNecesitan: lowStockProducts.length,
+        productos: lowStockProducts.slice(0, 10),
+        costoTotal: restockingCost,
+      }
+    });
+  } catch (error) {
+    console.error('Error dashboard extra:', error);
+    res.status(500).json({ message: 'Error al obtener estadísticas del dashboard' });
+  }
+};
+
 module.exports = {
   getDailyReport,
   getWeeklyReport,
@@ -832,4 +959,5 @@ module.exports = {
   getSalesHeatmap,
   getCashClose,
   getCashFlow,
+  getDashboardExtra,
 };

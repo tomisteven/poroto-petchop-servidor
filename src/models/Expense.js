@@ -6,7 +6,7 @@ const expenseSchema = new mongoose.Schema({
   fecha: { type: Date, default: Date.now },
   categoria: {
     type: String,
-    enum: ['alquiler', 'servicios', 'insumos', 'mantenimiento', 'impuestos', 'sueldos', 'otros'],
+    enum: ['alquiler', 'servicios', 'insumos', 'mantenimiento', 'impuestos', 'sueldos', 'otros', 'caja'],
     default: 'otros'
   },
   empleado: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },

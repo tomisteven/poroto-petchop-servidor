@@ -52,104 +52,120 @@ const generarOcurrencias = (evento) => {
   return ocurrencias;
 };
 
+const mapEvento = (e) => ({
+  id: e._id,
+  origen: 'evento',
+  tipo: e.tipo,
+  titulo: e.titulo,
+  descripcion: e.descripcion,
+  fecha: e.fecha,
+  hora: e.hora,
+  importe: e.importe,
+  categoria: e.categoria,
+  estado: e.estado,
+  recurrente: e.recurrente,
+  referenciaTipo: e.referenciaTipo,
+  referenciaId: e.referenciaId,
+  referenciaNombre: e.referenciaNombre,
+  empleado: e.empleado?.nombre
+});
+
+const mapOrden = (o) => ({
+  id: o._id,
+  origen: 'orden',
+  tipo: 'orden',
+  titulo: `${o.numero} · ${o.proveedor?.nombre || 'Sin proveedor'}`,
+  descripcion: `${o.items?.length || 0} productos`,
+  fecha: o.fecha,
+  hora: null,
+  importe: o.total,
+  categoria: null,
+  estado: 'pendiente',
+  recurrente: null,
+  referenciaTipo: 'ordenCompra',
+  referenciaId: o._id,
+  referenciaNombre: o.proveedor?.nombre,
+  empleado: null
+});
+
+const mapPresupuesto = (b) => ({
+  id: b._id,
+  origen: 'presupuesto',
+  tipo: 'presupuesto',
+  titulo: `${b.numero} · ${b.clienteNombre || 'Sin cliente'}`,
+  descripcion: `${b.items?.length || 0} productos`,
+  fecha: b.fecha,
+  hora: null,
+  importe: b.total,
+  categoria: null,
+  estado: 'pendiente',
+  recurrente: null,
+  referenciaTipo: 'presupuesto',
+  referenciaId: b._id,
+  referenciaNombre: b.clienteNombre,
+  empleado: null
+});
+
+const mapGasto = (g) => ({
+  id: g._id,
+  origen: 'gasto',
+  tipo: 'gasto',
+  titulo: g.descripcion,
+  descripcion: g.categoria || null,
+  fecha: g.fecha,
+  hora: null,
+  importe: g.monto,
+  categoria: g.categoria,
+  estado: 'completado',
+  recurrente: null,
+  referenciaTipo: 'gasto',
+  referenciaId: g._id,
+  referenciaNombre: g.categoria,
+  empleado: g.empleado?.nombre
+});
+
 const getCalendarItems = async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
+    const { startDate, endDate, incluirVencidos } = req.query;
     const start = normalizarFecha(startDate || new Date().toISOString().slice(0, 10));
     const end = normalizarFecha(endDate || startDate || new Date().toISOString().slice(0, 10));
     end.setDate(end.getDate() + 1);
 
-    const [eventos, ordenes, presupuestos, gastos] = await Promise.all([
-      CalendarEvent.find({ activo: true, estado: { $ne: 'cancelado' }, fecha: { $gte: start, $lt: end } })
+    const enRango = { $gte: start, $lt: end };
+    const incluirVenc = incluirVencidos === '1' || incluirVencidos === 'true';
+
+    const [eventos, ordenes, presupuestos, gastos, vencidosEventos, vencidosOrdenes, vencidosPresupuestos] = await Promise.all([
+      CalendarEvent.find({ activo: true, estado: { $ne: 'cancelado' }, fecha: enRango })
         .populate('empleado', 'nombre')
         .sort({ fecha: 1, hora: 1 }),
-      PurchaseOrder.find({ estado: 'pendiente', fecha: { $gte: start, $lt: end } })
+      PurchaseOrder.find({ estado: 'pendiente', fecha: enRango })
         .populate('proveedor', 'nombre'),
-      Budget.find({ estado: 'pendiente', fecha: { $gte: start, $lt: end } }),
-      Expense.find({ fecha: { $gte: start, $lt: end } })
+      Budget.find({ estado: 'pendiente', fecha: enRango }),
+      Expense.find({ fecha: enRango }),
+      incluirVenc
+        ? CalendarEvent.find({ activo: true, estado: 'pendiente', fecha: { $lt: start } })
+            .populate('empleado', 'nombre')
+            .sort({ fecha: 1, hora: 1 })
+        : [],
+      incluirVenc
+        ? PurchaseOrder.find({ estado: 'pendiente', fecha: { $lt: start } })
+            .populate('proveedor', 'nombre')
+        : [],
+      incluirVenc
+        ? Budget.find({ estado: 'pendiente', fecha: { $lt: start } })
+        : []
     ]);
 
     const items = [];
 
-    eventos.forEach(e => {
-      items.push({
-        id: e._id,
-        origen: 'evento',
-        tipo: e.tipo,
-        titulo: e.titulo,
-        descripcion: e.descripcion,
-        fecha: e.fecha,
-        hora: e.hora,
-        importe: e.importe,
-        categoria: e.categoria,
-        estado: e.estado,
-        recurrente: e.recurrente,
-        referenciaTipo: e.referenciaTipo,
-        referenciaId: e.referenciaId,
-        referenciaNombre: e.referenciaNombre,
-        empleado: e.empleado?.nombre
-      });
-    });
+    eventos.forEach(e => items.push(mapEvento(e)));
+    ordenes.forEach(o => items.push(mapOrden(o)));
+    presupuestos.forEach(b => items.push(mapPresupuesto(b)));
+    gastos.forEach(g => items.push(mapGasto(g)));
 
-    ordenes.forEach(o => {
-      items.push({
-        id: o._id,
-        origen: 'orden',
-        tipo: 'orden',
-        titulo: `${o.numero} · ${o.proveedor?.nombre || 'Sin proveedor'}`,
-        descripcion: `${o.items?.length || 0} productos`,
-        fecha: o.fecha,
-        hora: null,
-        importe: o.total,
-        categoria: null,
-        estado: 'pendiente',
-        recurrente: null,
-        referenciaTipo: 'ordenCompra',
-        referenciaId: o._id,
-        referenciaNombre: o.proveedor?.nombre,
-        empleado: null
-      });
-    });
-
-    presupuestos.forEach(b => {
-      items.push({
-        id: b._id,
-        origen: 'presupuesto',
-        tipo: 'presupuesto',
-        titulo: `${b.numero} · ${b.clienteNombre || 'Sin cliente'}`,
-        descripcion: `${b.items?.length || 0} productos`,
-        fecha: b.fecha,
-        hora: null,
-        importe: b.total,
-        categoria: null,
-        estado: 'pendiente',
-        recurrente: null,
-        referenciaTipo: 'presupuesto',
-        referenciaId: b._id,
-        referenciaNombre: b.clienteNombre,
-        empleado: null
-      });
-    });
-
-    gastos.forEach(g => {
-      items.push({
-        id: g._id,
-        origen: 'gasto',
-        tipo: 'gasto',
-        titulo: g.descripcion,
-        descripcion: g.categoria || null,
-        fecha: g.fecha,
-        hora: null,
-        importe: g.monto,
-        categoria: g.categoria,
-        estado: 'completado',
-        recurrente: null,
-        referenciaTipo: 'gasto',
-        referenciaId: g._id,
-        referenciaNombre: g.categoria,
-        empleado: g.empleado?.nombre
-      });
-    });
+    vencidosEventos.forEach(e => items.push(mapEvento(e)));
+    vencidosOrdenes.forEach(o => items.push(mapOrden(o)));
+    vencidosPresupuestos.forEach(b => items.push(mapPresupuesto(b)));
 
     items.sort((a, b) => new Date(a.fecha) - new Date(b.fecha) || (a.hora || '').localeCompare(b.hora || ''));
     res.json(items);

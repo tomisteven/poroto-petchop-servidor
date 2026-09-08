@@ -5,7 +5,7 @@ const { protect, admin } = require('../middlewares/auth');
 
 router.get('/', protect, getExpenses);
 router.get('/:id', protect, getExpense);
-router.post('/', protect, admin, createExpense);
+router.post('/', protect, createExpense);
 router.put('/:id', protect, admin, updateExpense);
 router.delete('/:id', protect, admin, deleteExpense);
 
