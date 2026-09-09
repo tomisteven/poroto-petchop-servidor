@@ -38,7 +38,10 @@ const createPublicOrder = async (req, res) => {
       const product = await Product.findById(item.producto);
       if (!product || !product.activo) continue;
 
-      const precio = product.precioVenta;
+      const esSuelto = !!item.esVentaSuelta;
+      const precio = (esSuelto && product.precioKilo && product.precioKilo > 0)
+        ? product.precioKilo
+        : product.precioVenta;
       const cantidad = Math.max(0.01, parseFloat(item.cantidad) || 1);
       const subtotal = precio * cantidad;
 
@@ -48,6 +51,9 @@ const createPublicOrder = async (req, res) => {
         precio,
         cantidad,
         subtotal,
+        unidadMedida: esSuelto ? 'kg' : (product.unidadMedida || 'unidad'),
+        esVentaSuelta: esSuelto,
+        kilosVendidos: esSuelto ? cantidad : 0,
       });
       total += subtotal;
     }

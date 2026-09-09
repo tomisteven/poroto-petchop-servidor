@@ -6,6 +6,9 @@ const orderItemSchema = new mongoose.Schema({
   precio: { type: Number, required: true },
   cantidad: { type: Number, required: true, min: 1 },
   subtotal: { type: Number, required: true },
+  unidadMedida: { type: String },
+  esVentaSuelta: { type: Boolean, default: false },
+  kilosVendidos: { type: Number, default: 0 },
 }, { _id: false });
 
 const orderSchema = new mongoose.Schema({
