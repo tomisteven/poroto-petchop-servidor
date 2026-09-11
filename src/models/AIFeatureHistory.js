@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const aiFeatureHistorySchema = new mongoose.Schema({
   tipo: {
     type: String,
-    enum: ['restock', 'precios', 'clientes', 'tendencias', 'promos', 'chatbot'],
+    enum: ['restock', 'precios', 'clientes', 'tendencias', 'promos', 'chatbot', 'ventas'],
     required: true,
   },
   titulo: { type: String, required: true },

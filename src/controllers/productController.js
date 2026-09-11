@@ -7,7 +7,7 @@ const Sale = require('../models/Sale');
 // @access  Private
 const getProducts = async (req, res) => {
   try {
-    const { category, lowStock, search } = req.query;
+    const { category, lowStock, search, sort } = req.query;
     let query = { activo: true };
 
     if (category) query.categoria = category;
@@ -22,6 +22,21 @@ const getProducts = async (req, res) => {
     let products = await Product.find(query)
       .populate('categoria', 'nombre color')
       .sort({ nombre: 1 });
+
+    if (sort === 'masVendidos') {
+      const salesCount = await Sale.aggregate([
+        { $match: { estado: 'completada' } },
+        { $unwind: '$items' },
+        { $match: { 'items.producto': { $ne: null } } },
+        { $group: { _id: '$items.producto', total: { $sum: '$items.cantidad' } } }
+      ]);
+      const salesMap = new Map(salesCount.map(s => [String(s._id), s.total]));
+      products.sort((a, b) => {
+        const sa = salesMap.get(String(a._id)) || 0;
+        const sb = salesMap.get(String(b._id)) || 0;
+        return sb - sa || a.nombre.localeCompare(b.nombre, 'es');
+      });
+    }
 
     if (lowStock === 'true') {
       products = products.filter(p => p.stock <= p.stockMinimo);
@@ -58,7 +73,7 @@ const createProduct = async (req, res) => {
     const {
       nombre, descripcion, sku, categoria, precioCompra, precioVenta,
       stock, stockMinimo, unidadMedida, proveedor, imagen,
-      esBolsaAlimento, kilosPorBolsa, precioKilo, margenSuelto, esGenerico, notasIA
+      esBolsaAlimento, kilosPorBolsa, precioKilo, margenSuelto, esGenerico, notasIA, aspectoBolsa
     } = req.body;
 
     let finalSku = sku;
@@ -74,7 +89,7 @@ const createProduct = async (req, res) => {
     const productData = {
       nombre, descripcion, categoria, precioCompra, precioVenta,
       stock: stock || 0, stockMinimo, unidadMedida, proveedor, imagen,
-      esBolsaAlimento, kilosPorBolsa, precioKilo, margenSuelto, esGenerico, notasIA,
+      esBolsaAlimento, kilosPorBolsa, precioKilo, margenSuelto, esGenerico, notasIA, aspectoBolsa,
       sku: finalSku,
     };
 
@@ -122,6 +137,7 @@ const updateProduct = async (req, res) => {
       if (req.body.margenSuelto !== undefined) product.margenSuelto = req.body.margenSuelto;
       if (req.body.esGenerico !== undefined) product.esGenerico = req.body.esGenerico;
       if (req.body.notasIA !== undefined) product.notasIA = req.body.notasIA;
+      if (req.body.aspectoBolsa !== undefined) product.aspectoBolsa = req.body.aspectoBolsa;
 
       if (req.body.stock !== undefined && Number(req.body.stock) !== product.stock) {
         const stockAnterior = product.stock;

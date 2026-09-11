@@ -57,6 +57,10 @@ const productSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    aspectoBolsa: {
+      type: String,
+      default: '',
+    },
     kilosPorBolsa: {
       type: Number,
     },

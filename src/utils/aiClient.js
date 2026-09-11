@@ -408,6 +408,7 @@ const generarDescripcion = async ({ nombre, notas }) => {
 };
 
 module.exports = {
+  callOpenAI,
   buildPromocionesPrompt,
   llamarIA,
   generarRecomendaciones,

@@ -199,11 +199,8 @@ if (item.kilosVendidos === undefined) {
          stockDeduction = item.cantidad;
       }
 
-      const availableStock = product.stock || 0;
-      // Convert to fixed for comparison to avoid floating point issues (e.g. 0.3 - 0.1 > 0.2)
-      if (availableStock < stockDeduction - 0.0001) {
-        throw new Error(`Stock insuficiente para el producto: ${product.nombre}. Solicitado: ${stockDeduction.toFixed(2)}, Disponible: ${availableStock.toFixed(2)}`);
-      }
+      // Se permite vender igual si el registro de stock dice 0 pero hay stock físico.
+      // El stock se descuenta igual y puede quedar negativo hasta reposición.
 
       subtotal += itemSubtotal;
 
