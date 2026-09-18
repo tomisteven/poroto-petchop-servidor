@@ -1,13 +1,9 @@
-const LoyaltyConfig = require('../models/LoyaltyConfig');
+const { getSystemConfigDoc } = require('./systemConfig');
 
-const getConfigDoc = async () => {
-  let config = await LoyaltyConfig.findOne({ singleton: 'config' });
-  if (!config) config = await LoyaltyConfig.create({ singleton: 'config' });
-  return config;
-};
+const getConfigDoc = async () => getSystemConfigDoc();
 
 const calcularPuntos = async (total) => {
-  const config = await getConfigDoc();
+  const config = await getSystemConfigDoc();
   return Math.floor((total || 0) / config.pesosPorPunto);
 };
 

@@ -947,6 +947,149 @@ const getDashboardExtra = async (req, res) => {
   }
 };
 
+// @desc    Análisis de productos: cuáles conviene vender más según costo y ganancia
+// @route   GET /api/reports/product-analysis
+const getProductAnalysis = async (req, res) => {
+  try {
+    const { dias } = req.query;
+    let desde = null;
+    if (dias && parseInt(dias) > 0) {
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - parseInt(dias));
+      const [y, m, d] = cutoff.toLocaleDateString('en-CA', { timeZone: 'America/Argentina/Buenos_Aires' }).split('-').map(Number);
+      desde = new Date(Date.UTC(y, m - 1, d, 3, 0, 0, 0));
+    }
+
+    const match = { estado: 'completada' };
+    if (desde) match.fecha = { $gte: desde };
+
+    const salesAgg = await Sale.aggregate([
+      { $match: match },
+      { $unwind: '$items' },
+      {
+        $group: {
+          _id: { producto: '$items.producto', venta: '$_id' },
+          subtotal: { $sum: '$items.subtotal' },
+          costo: { $sum: { $multiply: ['$items.precioCompraHisto', '$items.cantidad'] } },
+          subtotalSuelta: { $sum: { $cond: [{ $eq: ['$items.esVentaSuelta', true] }, '$items.subtotal', 0] } },
+          costoSuelta: { $sum: { $cond: [{ $eq: ['$items.esVentaSuelta', true] }, { $multiply: ['$items.precioCompraHisto', '$items.cantidad'] }, 0] } },
+          bolsas: { $sum: { $cond: [{ $ne: ['$items.esVentaSuelta', true] }, '$items.cantidad', 0] } },
+          kilosSuelta: {
+            $sum: { $cond: [{ $eq: ['$items.esVentaSuelta', true] }, { $ifNull: ['$items.kilosVendidos', 0] }, 0] }
+          }
+        }
+      },
+      {
+        $group: {
+          _id: '$_id.producto',
+          tickets: { $sum: 1 },
+          bolsas: { $sum: '$bolsas' },
+          kilosSuelta: { $sum: '$kilosSuelta' },
+          ingresos: { $sum: '$subtotal' },
+          costoHistorico: { $sum: '$costo' },
+          ingresosSuelta: { $sum: '$subtotalSuelta' },
+          costoSuelta: { $sum: '$costoSuelta' }
+        }
+      }
+    ]);
+
+    const products = await Product.find({})
+      .populate('categoria', 'nombre')
+      .select('nombre sku categoria precioCompra precioVenta stock stockMinimo activo esGenerico esBolsaAlimento kilosPorBolsa precioKilo margenSuelto');
+
+    const aggMap = new Map(salesAgg.map(o => [String(o._id), o]));
+
+    const result = products.map(p => {
+      const agg = aggMap.get(String(p._id)) || { bolsas: 0, kilosSuelta: 0, ingresos: 0, costoHistorico: 0, ingresosSuelta: 0, costoSuelta: 0, tickets: 0 };
+      const tieneVentas = agg.ingresos > 0;
+      const esFraccionable = !!p.esBolsaAlimento && !!p.kilosPorBolsa && p.kilosPorBolsa > 0;
+
+      // Métricas por kilo para alimentos fraccionables (venta suelta), por unidad para el resto
+      let gananciaUnitaria, margenPct, roiPct;
+      const bolsa = { costoPorKilo: null, precioKiloBase: null, precioKiloEfectivo: null, gananciaPorKilo: null };
+      const volumen = agg.kilosSuelta + agg.bolsas * (esFraccionable ? p.kilosPorBolsa : 1);
+
+      if (esFraccionable) {
+        const costoKilo = p.precioCompra / p.kilosPorBolsa;
+        const precioKiloBase = (p.precioKilo && p.precioKilo > 0) ? p.precioKilo : p.precioVenta / p.kilosPorBolsa;
+        const precioKiloEfectivo = (p.precioKilo && p.precioKilo > 0) ? precioKiloBase : precioKiloBase * (1 + ((p.margenSuelto || 42) / 100));
+        const gananciaKilo = precioKiloEfectivo - costoKilo;
+        bolsa.costoPorKilo = +costoKilo.toFixed(2);
+        bolsa.precioKiloBase = +precioKiloBase.toFixed(2);
+        bolsa.precioKiloEfectivo = +precioKiloEfectivo.toFixed(2);
+        bolsa.gananciaPorKilo = +gananciaKilo.toFixed(2);
+        gananciaUnitaria = gananciaKilo;
+        margenPct = precioKiloEfectivo > 0 ? (gananciaKilo / precioKiloEfectivo) * 100 : 0;
+        roiPct = costoKilo > 0 ? (gananciaKilo / costoKilo) * 100 : 0;
+      } else {
+        gananciaUnitaria = p.precioVenta - p.precioCompra;
+        margenPct = p.precioVenta > 0 ? (gananciaUnitaria / p.precioVenta) * 100 : 0;
+        roiPct = p.precioCompra > 0 ? (gananciaUnitaria / p.precioCompra) * 100 : 0;
+      }
+
+      const gananciaHistorica = agg.ingresos - agg.costoHistorico;
+      const margenHistoricoPct = agg.ingresos > 0 ? (gananciaHistorica / agg.ingresos) * 100 : margenPct;
+      // Bonus por rotación: los que ya se venden reciben un pequeño refuerzo en el score
+      const velocityBonus = Math.min(volumen, 20);
+      const score = Math.round(roiPct * 0.7 + margenPct * 0.3 + (tieneVentas ? velocityBonus : 0));
+
+      return {
+        id: p._id,
+        nombre: p.nombre,
+        sku: p.sku,
+        categoria: p.categoria?.nombre || 'Sin categoría',
+        activo: p.activo,
+        esGenerico: p.esGenerico,
+        esFraccionable,
+        kilosPorBolsa: p.kilosPorBolsa || null,
+        precioCompra: p.precioCompra,
+        precioVenta: p.precioVenta,
+        stock: p.stock,
+        stockMinimo: p.stockMinimo,
+        gananciaUnitaria: +gananciaUnitaria.toFixed(2),
+        margenPct: +margenPct.toFixed(2),
+        roiPct: +roiPct.toFixed(2),
+        bolsa,
+        unidadesVendidas: !esFraccionable ? agg.bolsas : 0,
+        bolsasVendidas: agg.bolsas,
+        kilosVendidos: agg.kilosSuelta,
+        volumen: +volumen.toFixed(2),
+        tickets: agg.tickets,
+        ingresos: agg.ingresos,
+        costoHistorico: agg.costoHistorico,
+        ingresosSuelta: +agg.ingresosSuelta.toFixed(2),
+        costoSuelta: +agg.costoSuelta.toFixed(2),
+        gananciaSuelta: +((agg.ingresosSuelta || 0) - (agg.costoSuelta || 0)).toFixed(2),
+        gananciaHistorica: +gananciaHistorica.toFixed(2),
+        margenHistoricoPct: +margenHistoricoPct.toFixed(2),
+        tieneVentas,
+        score
+      };
+    });
+
+    const conVentas = result.filter(p => p.tieneVentas);
+    const ingresosPeriodo = result.reduce((a, p) => a + p.ingresos, 0);
+    const costoPeriodo = result.reduce((a, p) => a + p.costoHistorico, 0);
+    const gananciaPeriodo = ingresosPeriodo - costoPeriodo;
+
+    res.json({
+      periodo: { dias: desde ? parseInt(dias) : null },
+      summary: {
+        totalProductos: result.length,
+        conVentas: conVentas.length,
+        ingresosPeriodo,
+        costoPeriodo: +costoPeriodo.toFixed(2),
+        gananciaPeriodo: +gananciaPeriodo.toFixed(2),
+        margenPromedioPct: ingresosPeriodo > 0 ? +(((ingresosPeriodo - costoPeriodo) / ingresosPeriodo) * 100).toFixed(2) : 0
+      },
+      products: result
+    });
+  } catch (error) {
+    console.error('Error product-analysis:', error);
+    res.status(500).json({ message: 'Error al generar el análisis de productos' });
+  }
+};
+
 module.exports = {
   getDailyReport,
   getWeeklyReport,
@@ -960,4 +1103,5 @@ module.exports = {
   getCashClose,
   getCashFlow,
   getDashboardExtra,
+  getProductAnalysis,
 };

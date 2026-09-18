@@ -13,6 +13,7 @@ const {
   getCashClose,
   getCashFlow,
   getDashboardExtra,
+  getProductAnalysis,
 } = require('../controllers/reportController');
 const { protect, admin } = require('../middlewares/auth');
 
@@ -28,5 +29,6 @@ router.get('/sales-heatmap', protect, getSalesHeatmap);
 router.get('/cash-close', protect, getCashClose);
 router.get('/cash-flow', protect, getCashFlow);
 router.get('/dashboard-extra', protect, getDashboardExtra);
+router.get('/product-analysis', protect, getProductAnalysis);
 
 module.exports = router;

@@ -431,10 +431,242 @@ const setSaleCustomer = async (req, res) => {
   }
 };
 
+// @desc    Editar una venta completada (items, descuento, pago). Ajusta stock por delta.
+// @route   PATCH /api/sales/:id
+// @access  Private/Admin
+const updateSale = async (req, res) => {
+  try {
+    const sale = await Sale.findById(req.params.id);
+    if (!sale) throw new Error('Venta no encontrada');
+    if (sale.estado !== 'completada') throw new Error('Solo se pueden editar ventas completadas');
+
+    const { items, descuento, metodoPago, montoPagado, notas } = req.body;
+    if (!items || items.length === 0) throw new Error('No hay productos en la venta editada');
+
+    // Mapa de precios/costos históricos de las líneas ya existentes (para no repreciar la venta)
+    const oldByProduct = new Map();
+    const oldConsumed = new Map();
+    for (const it of sale.items) {
+      if (it.promocion) {
+        oldByProduct.set(`promo:${String(it.promocion)}`, {
+          precioVenta: it.precioVentaHisto,
+          precioCompra: it.precioCompraHisto,
+        });
+        const promotion = await Promotion.findById(it.promocion);
+        if (promotion) {
+          for (const pi of promotion.items) {
+            oldConsumed.set(String(pi.producto), (oldConsumed.get(String(pi.producto)) || 0) + (pi.cantidad * it.cantidad));
+          }
+        }
+      } else {
+        const perUnit = it.esVentaSuelta && it.cantidad > 0 ? it.subtotal / it.cantidad : it.precioVentaHisto;
+        oldByProduct.set(String(it.producto), {
+          precioVenta: perUnit,
+          precioCompra: it.precioCompraHisto,
+          kilosVendidos: it.kilosVendidos,
+          esVentaSuelta: it.esVentaSuelta,
+        });
+        const product = await Product.findById(it.producto);
+        if (product && it.esVentaSuelta && product.esBolsaAlimento && product.kilosPorBolsa) {
+          oldConsumed.set(String(it.producto), (oldConsumed.get(String(it.producto)) || 0) + ((it.kilosVendidos || 0) / product.kilosPorBolsa));
+        } else {
+          oldConsumed.set(String(it.producto), (oldConsumed.get(String(it.producto)) || 0) + it.cantidad);
+        }
+      }
+    }
+
+    const newConsumed = new Map();
+    const saleItems = [];
+    let subtotal = 0;
+
+    for (const item of items) {
+      if (item.promocion) {
+        const promotion = await Promotion.findById(item.promocion);
+        if (!promotion) throw new Error(`Promoción no encontrada: ${item.promocion}`);
+
+        const existed = oldByProduct.has(`promo:${String(item.promocion)}`);
+        if (!existed && (!promotion.activo || promotion.estado !== 'activa')) {
+          throw new Error(`La promoción "${promotion.nombre}" no está activa`);
+        }
+
+        const cantidadPromos = item.cantidad || 1;
+        const old = oldByProduct.get(`promo:${String(item.promocion)}`);
+        const promoUnit = old ? old.precioVenta : promotion.precioFinal;
+        const promoCost = old ? old.precioCompra : promotion.subtotalCosto;
+        const promoSubtotal = promoUnit * cantidadPromos;
+
+        for (const pi of promotion.items) {
+          const product = await Product.findById(pi.producto);
+          if (!product) continue;
+          newConsumed.set(String(product._id), (newConsumed.get(String(product._id)) || 0) + (pi.cantidad * cantidadPromos));
+        }
+
+        subtotal += promoSubtotal;
+        saleItems.push({
+          producto: promotion.productoPrincipal,
+          promocion: promotion._id,
+          nombre: promotion.nombre,
+          cantidad: cantidadPromos,
+          precioVentaHisto: promoUnit,
+          precioCompraHisto: promoCost,
+          subtotal: promoSubtotal,
+          esVentaSuelta: false,
+        });
+        continue;
+      }
+
+      const product = await Product.findById(item.producto);
+      if (!product) throw new Error(`Producto no encontrado: ${item.producto}`);
+
+      const old = oldByProduct.get(String(product._id));
+      const esVentaSuelta = item.esVentaSuelta && product.esBolsaAlimento;
+
+      if (esVentaSuelta) {
+        if (!product.kilosPorBolsa || product.kilosPorBolsa <= 0) {
+          throw new Error(`El producto ${product.nombre} no tiene kilos configurados para venta suelta`);
+        }
+
+        let unitPrice;
+        let kilosVendidosCalculados;
+        if (old && old.esVentaSuelta) {
+          unitPrice = old.precioVenta;
+          const oldCantidad = sale.items.find((i) => !i.promocion && String(i.producto) === String(product._id))?.cantidad || 1;
+          kilosVendidosCalculados = ((old.kilosVendidos || 0) / oldCantidad) * item.cantidad;
+        } else {
+          if (item.subtotal === undefined) {
+            throw new Error(`Debe mandar el subtotal cobrado para venta suelta de: ${product.nombre}`);
+          }
+          const pricePerKg = product.precioKilo || ((product.precioVenta / product.kilosPorBolsa) * (1 + ((product.margenSuelto || 42) / 100)));
+          unitPrice = item.cantidad > 0 ? item.subtotal / item.cantidad : item.subtotal;
+          kilosVendidosCalculados = item.kilosVendidos !== undefined ? item.kilosVendidos : item.subtotal / pricePerKg;
+        }
+
+        const itemSubtotal = unitPrice * item.cantidad;
+        newConsumed.set(String(product._id), (newConsumed.get(String(product._id)) || 0) + (kilosVendidosCalculados / product.kilosPorBolsa));
+
+        saleItems.push({
+          producto: product._id,
+          cantidad: item.cantidad,
+          precioVentaHisto: itemSubtotal,
+          precioCompraHisto: old ? old.precioCompra : (product.precioCompra / product.kilosPorBolsa) * kilosVendidosCalculados,
+          subtotal: itemSubtotal,
+          esVentaSuelta: true,
+          kilosVendidos: kilosVendidosCalculados,
+        });
+        subtotal += itemSubtotal;
+        continue;
+      }
+
+      let unitPrice;
+      if (product.esGenerico) {
+        unitPrice = old ? old.precioVenta : (item.precioUnitario !== undefined ? item.precioUnitario : product.precioVenta);
+      } else {
+        unitPrice = old ? old.precioVenta : product.precioVenta;
+      }
+
+      const itemSubtotal = unitPrice * item.cantidad;
+      newConsumed.set(String(product._id), (newConsumed.get(String(product._id)) || 0) + item.cantidad);
+
+      saleItems.push({
+        producto: product._id,
+        cantidad: item.cantidad,
+        precioVentaHisto: unitPrice,
+        precioCompraHisto: old ? old.precioCompra : product.precioCompra,
+        subtotal: itemSubtotal,
+        esVentaSuelta: false,
+      });
+      subtotal += itemSubtotal;
+    }
+
+    const discountAmount = descuento ? (subtotal * (descuento / 100)) : 0;
+    const totalFinal = subtotal - discountAmount;
+    const vuelto = montoPagado - totalFinal;
+
+    if (vuelto < -0.01) {
+      throw new Error('El monto pagado es menor al total de la venta editada');
+    }
+
+    // === Ajuste de stock por delta (devuelve lo quitado, descuenta lo agregado) ===
+    const productIds = new Set([...oldConsumed.keys(), ...newConsumed.keys()]);
+    const stockMovements = [];
+    const productsToUpdate = [];
+
+    for (const pid of productIds) {
+      const diff = (newConsumed.get(pid) || 0) - (oldConsumed.get(pid) || 0);
+      const rounded = Math.round((diff + Number.EPSILON) * 1000) / 1000;
+      if (Math.abs(rounded) < 0.0001) continue;
+
+      const product = await Product.findById(pid);
+      if (!product) continue;
+      const motivo = `Edición de ticket ${sale.numeroTicket}`;
+
+      if (rounded > 0) {
+        stockMovements.push({
+          producto: product._id,
+          tipo: 'venta',
+          cantidad: rounded,
+          stockAnterior: product.stock,
+          stockNuevo: product.stock - rounded,
+          motivo,
+          usuario: req.user._id
+        });
+        productsToUpdate.push({ updateOne: { filter: { _id: product._id }, update: { $inc: { stock: -rounded } } } });
+      } else {
+        const amount = -rounded;
+        stockMovements.push({
+          producto: product._id,
+          tipo: 'ajuste',
+          cantidad: amount,
+          stockAnterior: product.stock,
+          stockNuevo: product.stock + amount,
+          motivo,
+          usuario: req.user._id
+        });
+        productsToUpdate.push({ updateOne: { filter: { _id: product._id }, update: { $inc: { stock: amount } } } });
+      }
+    }
+
+    // === Puntos del cliente (recalcular contra el nuevo total) ===
+    const puntosNuevos = sale.cliente ? await calcularPuntos(totalFinal) : 0;
+    const puntosDelta = puntosNuevos - (sale.puntosGanados || 0);
+
+    sale.items = saleItems;
+    sale.subtotal = subtotal;
+    sale.descuento = descuento || 0;
+    sale.totalFinal = totalFinal;
+    sale.metodoPago = metodoPago;
+    sale.montoPagado = montoPagado;
+    sale.vuelto = vuelto < 0 ? 0 : vuelto;
+    sale.puntosGanados = puntosNuevos;
+    if (notas !== undefined) sale.notas = notas || undefined;
+    await sale.save();
+
+    if (sale.cliente && puntosDelta !== 0) {
+      await Customer.findByIdAndUpdate(sale.cliente, { $inc: { puntos: puntosDelta } });
+    }
+
+    if (stockMovements.length > 0) {
+      await StockMovement.insertMany(stockMovements);
+      await Product.bulkWrite(productsToUpdate);
+    }
+
+    const updated = await Sale.findById(sale._id)
+      .populate('empleado', 'nombre')
+      .populate('cliente', 'nombre telefono')
+      .populate('items.producto', 'nombre sku')
+      .populate('items.promocion', 'nombre numero');
+
+    res.json(updated);
+  } catch (error) {
+    res.status(400).json({ message: error.message });
+  }
+};
+
 module.exports = {
   getSales,
   getSaleById,
   createSale,
   cancelSale,
-  setSaleCustomer
+  setSaleCustomer,
+  updateSale
 };
