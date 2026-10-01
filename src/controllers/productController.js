@@ -1,23 +1,79 @@
 const Product = require('../models/Product');
 const StockMovement = require('../models/StockMovement');
 const Sale = require('../models/Sale');
+const Category = require('../models/Category');
 
-// @desc    Obtener productos
+const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// Convierte un término de búsqueda parecido a un número ("12000", "$12.000", "12,5") a Number, o null.
+const termNumber = (t) => {
+  const raw = String(t).replace(/[^0-9.,-]/g, '');
+  if (!raw) return null;
+  const normalized = raw.replace(/([.,])(?=\d{3}(?:[.,]|$))/g, '').replace(',', '.');
+  const n = Number(normalized);
+  return Number.isFinite(n) ? n : null;
+};
+
+// Filtro de búsqueda avanzada para un término: nombre, SKU, descripción, proveedor, envase,
+// categoría (por nombre) y campos numéricos (precio, stock, kilos).
+const buildTermFilter = async (term) => {
+  const or = ['nombre', 'sku', 'descripcion', 'proveedor', 'aspectoBolsa'].map((f) => ({
+    [f]: { $regex: escapeRegex(term), $options: 'i' },
+  }));
+
+  const num = termNumber(term);
+  if (num !== null) {
+    ['precioVenta', 'precioCompra', 'precioKilo', 'stock', 'kilosPorBolsa'].forEach((f) => {
+      or.push({ [f]: num });
+    });
+  }
+
+  const cats = await Category.find({ nombre: { $regex: escapeRegex(term), $options: 'i' } }).select('_id');
+  if (cats.length > 0) or.push({ categoria: { $in: cats.map((c) => c._id) } });
+
+  return { $or: or };
+};
+
+// @desc    Obtener productos (con búsqueda avanzada y filtros)
 // @route   GET /api/products
+// @query   q, search, category, conPrecio, sinPrecio, minPrecio, maxPrecio,
+//          esGenerico, esBolsaAlimento, esCombo, agotados, lowStock, sort
 // @access  Private
 const getProducts = async (req, res) => {
   try {
-    const { category, lowStock, search, sort } = req.query;
-    let query = { activo: true };
+    const {
+      category, lowStock, search, q, sort,
+      conPrecio, sinPrecio, minPrecio, maxPrecio,
+      esGenerico, esBolsaAlimento, esCombo, agotados,
+    } = req.query;
 
-    if (category) query.categoria = category;
-    
-    if (search) {
-      query.$or = [
-        { nombre: { $regex: search, $options: 'i' } },
-        { sku: { $regex: search, $options: 'i' } }
-      ];
+    // "Tiene precio" = precio de compra o de venta mayor a 0.
+    const hasPriceOr = [{ precioCompra: { $gt: 0 } }, { precioVenta: { $gt: 0 } }];
+
+    const clauses = [{ activo: true }];
+    if (category) clauses.push({ categoria: category });
+    if (conPrecio === 'true') clauses.push({ $or: hasPriceOr });
+    if (sinPrecio === 'true') clauses.push({ $nor: hasPriceOr });
+    if (esGenerico === 'true') clauses.push({ esGenerico: true });
+    if (esBolsaAlimento === 'true') clauses.push({ esBolsaAlimento: true });
+    if (esCombo === 'true') clauses.push({ esCombo: true });
+    if (agotados === 'true') clauses.push({ stock: { $lte: 0 } });
+
+    const priceCond = {};
+    if (minPrecio && Number.isFinite(Number(minPrecio))) priceCond.$gte = Number(minPrecio);
+    if (maxPrecio && Number.isFinite(Number(maxPrecio))) priceCond.$lte = Number(maxPrecio);
+    if (Object.keys(priceCond).length > 0) clauses.push({ precioVenta: priceCond });
+
+    if (q) {
+      const terms = String(q).trim().split(/\s+/).filter(Boolean);
+      for (const t of terms) {
+        clauses.push(await buildTermFilter(t));
+      }
+    } else if (search) {
+      clauses.push(await buildTermFilter(search));
     }
+
+    const query = clauses.length === 1 ? clauses[0] : { $and: clauses };
 
     let products = await Product.find(query)
       .populate('categoria', 'nombre color')
@@ -42,6 +98,10 @@ const getProducts = async (req, res) => {
       products = products.filter(p => p.stock <= p.stockMinimo);
     }
 
+    products.forEach(p => {
+      if (p.esBolsaAlimento && p.gramosBolsaAbierta == null) p.gramosBolsaAbierta = 0;
+    });
+
     res.json(products);
   } catch (error) {
     res.status(500).json({ message: 'Error al obtener productos' });
@@ -56,12 +116,54 @@ const getProductById = async (req, res) => {
     const product = await Product.findById(req.params.id).populate('categoria', 'nombre color');
 
     if (product && product.activo) {
+      if (product.esBolsaAlimento && product.gramosBolsaAbierta == null) product.gramosBolsaAbierta = 0;
       res.json(product);
     } else {
       res.status(404).json({ message: 'Producto no encontrado' });
     }
   } catch (error) {
     res.status(500).json({ message: 'Error al obtener producto' });
+  }
+};
+
+// @desc    Abrir manualmente una bolsa de alimento para venta suelta
+// @route   POST /api/products/:id/abrir-bolsa
+// @access  Private
+const abrirBolsa = async (req, res) => {
+  try {
+    const product = await Product.findById(req.params.id);
+
+    if (!product) {
+      return res.status(404).json({ message: 'Producto no encontrado' });
+    }
+    if (!product.esBolsaAlimento || !product.kilosPorBolsa || product.kilosPorBolsa <= 0) {
+      return res.status(400).json({ message: 'El producto no es una bolsa de alimento fraccionable' });
+    }
+    if ((Number(product.gramosBolsaAbierta) || 0) > 0) {
+      return res.status(400).json({ message: 'Ya hay una bolsa abierta para este producto' });
+    }
+    if (product.stock < 1) {
+      return res.status(400).json({ message: 'No hay bolsas selladas para abrir' });
+    }
+
+    const stockAnterior = product.stock;
+    product.stock -= 1;
+    product.gramosBolsaAbierta = product.kilosPorBolsa * 1000;
+    await product.save();
+
+    await StockMovement.create({
+      producto: product._id,
+      tipo: 'salida',
+      cantidad: 1,
+      stockAnterior,
+      stockNuevo: product.stock,
+      motivo: 'Apertura manual de bolsa suelta',
+      usuario: req.user._id
+    });
+
+    res.json(product);
+  } catch (error) {
+    res.status(500).json({ message: 'Error al abrir la bolsa' });
   }
 };
 
@@ -73,7 +175,8 @@ const createProduct = async (req, res) => {
     const {
       nombre, descripcion, sku, categoria, precioCompra, precioVenta,
       stock, stockMinimo, unidadMedida, proveedor, imagen,
-      esBolsaAlimento, kilosPorBolsa, precioKilo, margenSuelto, esGenerico, notasIA, aspectoBolsa
+      esBolsaAlimento, kilosPorBolsa, precioKilo, margenSuelto, esGenerico, notasIA, aspectoBolsa,
+      mostrarEnCatalogo,
     } = req.body;
 
     let finalSku = sku;
@@ -90,6 +193,7 @@ const createProduct = async (req, res) => {
       nombre, descripcion, categoria, precioCompra, precioVenta,
       stock: stock || 0, stockMinimo, unidadMedida, proveedor, imagen,
       esBolsaAlimento, kilosPorBolsa, precioKilo, margenSuelto, esGenerico, notasIA, aspectoBolsa,
+      mostrarEnCatalogo: mostrarEnCatalogo !== undefined ? mostrarEnCatalogo : true,
       sku: finalSku,
     };
 
@@ -138,6 +242,7 @@ const updateProduct = async (req, res) => {
       if (req.body.esGenerico !== undefined) product.esGenerico = req.body.esGenerico;
       if (req.body.notasIA !== undefined) product.notasIA = req.body.notasIA;
       if (req.body.aspectoBolsa !== undefined) product.aspectoBolsa = req.body.aspectoBolsa;
+      if (req.body.mostrarEnCatalogo !== undefined) product.mostrarEnCatalogo = req.body.mostrarEnCatalogo;
 
       if (req.body.stock !== undefined && Number(req.body.stock) !== product.stock) {
         const stockAnterior = product.stock;
@@ -308,6 +413,14 @@ const bulkAction = async (req, res) => {
           break;
         }
 
+        case 'mostrar_en_catalogo':
+          bulkOps.push({ updateOne: { filter: { _id: product._id }, update: { $set: { mostrarEnCatalogo: true } } } });
+          break;
+
+        case 'ocultar_del_catalogo':
+          bulkOps.push({ updateOne: { filter: { _id: product._id }, update: { $set: { mostrarEnCatalogo: false } } } });
+          break;
+
         default:
           return res.status(400).json({ message: `Acción desconocida: ${accion}` });
       }
@@ -348,7 +461,7 @@ const getProductsWithoutMovement = async (req, res) => {
 
 const getPublicCatalog = async (req, res) => {
   try {
-    const products = await Product.find({ activo: true })
+    const products = await Product.find({ activo: true, mostrarEnCatalogo: { $ne: false } })
       .populate('categoria', 'nombre color')
       .sort({ nombre: 1 });
     res.json(products);
@@ -367,5 +480,6 @@ module.exports = {
   getLowStockProducts,
   bulkAction,
   getProductsWithoutMovement,
-  getPublicCatalog
+  getPublicCatalog,
+  abrirBolsa
 };

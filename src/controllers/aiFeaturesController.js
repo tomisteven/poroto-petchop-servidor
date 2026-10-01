@@ -468,11 +468,163 @@ const DIAS_CERRADOS = [0];
 
 const formatMoney = (n) => '$' + Math.round(n || 0).toLocaleString('es-AR');
 
+// ─── 8.0. SNAPSHOT DE VENTAS (datos agregados compartidos con la IA) ───
+const armarDatosVentas = async ({ desde, hasta }) => {
+  const dias = Math.round((hasta - desde) / 86400000) + 1;
+
+  const [sales, products] = await Promise.all([
+    Sale.find({ fecha: { $gte: desde, $lte: hasta }, estado: 'completada' })
+      .select('fecha items totalFinal')
+      .lean(),
+    Product.find({ activo: true }).populate('categoria', 'nombre').lean(),
+  ]);
+
+  const productMap = new Map(products.map((p) => [p._id.toString(), p]));
+  const diasSemana = DIAS_SEMANA.map((nombre, i) => ({ nombre, cerrado: DIAS_CERRADOS.includes(i), ventas: 0, facturacion: 0 }));
+  const horas = Array.from({ length: 24 }, (_, i) => ({ hora: i, ventas: 0, facturacion: 0 }));
+  const porProducto = new Map();
+  const porCategoria = new Map();
+
+  let totalVentas = 0;
+  let facturacion = 0;
+  let costo = 0;
+  let unidades = 0;
+
+  for (const sale of sales) {
+    const d = new Date(sale.fecha);
+    const dia = d.getDay();
+    const hora = d.getHours();
+
+    totalVentas++;
+    facturacion += sale.totalFinal || 0;
+    diasSemana[dia].ventas++;
+    diasSemana[dia].facturacion += sale.totalFinal || 0;
+    horas[hora].ventas++;
+    horas[hora].facturacion += sale.totalFinal || 0;
+
+    for (const item of (sale.items || [])) {
+      const pid = item.producto?.toString();
+      if (!pid) continue;
+      const itemCosto = (item.precioCompraHisto || 0) * (item.cantidad || 0);
+      costo += itemCosto;
+      unidades += item.cantidad || 0;
+
+      let agg = porProducto.get(pid);
+      if (!agg) { agg = { unidades: 0, facturacion: 0, costo: 0 }; porProducto.set(pid, agg); }
+      agg.unidades += item.cantidad || 0;
+      agg.facturacion += item.subtotal || 0;
+      agg.costo += itemCosto;
+
+      const product = productMap.get(pid);
+      const cat = product?.categoria?.nombre || 'Sin categoría';
+      let catAgg = porCategoria.get(cat);
+      if (!catAgg) { catAgg = { unidades: 0, facturacion: 0, costo: 0 }; porCategoria.set(cat, catAgg); }
+      catAgg.unidades += item.cantidad || 0;
+      catAgg.facturacion += item.subtotal || 0;
+      catAgg.costo += itemCosto;
+    }
+  }
+
+  const round2 = (n) => Math.round((n || 0) * 100) / 100;
+
+  const productosData = [...porProducto.entries()].map(([pid, agg]) => {
+    const product = productMap.get(pid);
+    const ganancia = agg.facturacion - agg.costo;
+    return {
+      id: pid,
+      nombre: product?.nombre || 'Producto eliminado',
+      sku: product?.sku || '',
+      categoria: product?.categoria?.nombre || 'Sin categoría',
+      unidadMedida: product?.unidadMedida || 'unidad',
+      precioVenta: product?.precioVenta || 0,
+      precioCompra: product?.precioCompra || 0,
+      stock: product?.stock ?? 0,
+      stockMinimo: product?.stockMinimo ?? 0,
+      necesitaReponer: product ? product.stock <= product.stockMinimo : false,
+      unidades: round2(agg.unidades),
+      facturacion: round2(agg.facturacion),
+      costo: round2(agg.costo),
+      ganancia: round2(ganancia),
+      margenPct: agg.facturacion > 0 ? Math.round((ganancia / agg.facturacion) * 100) : 0,
+    };
+  }).sort((a, b) => b.facturacion - a.facturacion);
+
+  const categoriasData = [...porCategoria.entries()].map(([nombre, agg]) => ({
+    nombre,
+    unidades: round2(agg.unidades),
+    facturacion: round2(agg.facturacion),
+    costo: round2(agg.costo),
+    ganancia: round2(agg.facturacion - agg.costo),
+    margenPct: agg.facturacion > 0 ? Math.round(((agg.facturacion - agg.costo) / agg.facturacion) * 100) : 0,
+  })).sort((a, b) => b.facturacion - a.facturacion);
+
+  const gananciaTotal = facturacion - costo;
+  const margenGlobal = facturacion > 0 ? Math.round((gananciaTotal / facturacion) * 100) : 0;
+  const ticketPromedio = totalVentas > 0 ? Math.round(facturacion / totalVentas) : 0;
+
+  const topFacturacion = productosData.slice(0, 15);
+  const topGanancia = [...productosData].sort((a, b) => b.ganancia - a.ganancia).slice(0, 10);
+
+  const diasTexto = diasSemana
+    .map((d) => `- ${d.nombre}${d.cerrado ? ' (CERRADO)' : ''}: ${formatMoney(d.facturacion)} / ${d.ventas} ventas`)
+    .join('\n');
+
+  const topHoras = [...horas].sort((a, b) => b.facturacion - a.facturacion).filter((h) => h.ventas > 0);
+  const horasPico = topHoras.slice(0, 4).map((h) => `- ${String(h.hora).padStart(2, '0')}:00 hs → ${formatMoney(h.facturacion)} en ${h.ventas} ventas`).join('\n') || '- sin datos';
+  const horasFlojas = topHoras.slice(-3).map((h) => `- ${String(h.hora).padStart(2, '0')}:00 hs → ${formatMoney(h.facturacion)} en ${h.ventas} ventas`).join('\n') || '- sin datos';
+
+  const topFacturacionTexto = topFacturacion.map((p) =>
+    `- ${p.nombre} (${p.categoria}): ${p.unidades} uds, ${formatMoney(p.facturacion)}, ganancia ${formatMoney(p.ganancia)} (${p.margenPct}%), stock ${p.stock}${p.necesitaReponer ? ' (REPONER)' : ''}`
+  ).join('\n');
+
+  const topGananciaTexto = topGanancia.map((p) =>
+    `- ${p.nombre}: ganancia ${formatMoney(p.ganancia)} (${p.margenPct}%), vende ${p.unidades} uds, stock ${p.stock}`
+  ).join('\n');
+
+  const categoriasTexto = categoriasData.map((c) =>
+    `- ${c.nombre}: ${formatMoney(c.facturacion)} / ganancia ${formatMoney(c.ganancia)} (${c.margenPct}%)`
+  ).join('\n');
+
+  return {
+    desde,
+    hasta,
+    dias,
+    totalVentas,
+    facturacion,
+    costo,
+    gananciaTotal,
+    margenGlobal,
+    ticketPromedio,
+    unidades,
+    diasSemana,
+    horas,
+    categorias: categoriasData,
+    productos: productosData,
+    resumen: {
+      ventas: totalVentas,
+      facturacion: round2(facturacion),
+      costo: round2(costo),
+      ganancia: round2(gananciaTotal),
+      margenPct: margenGlobal,
+      ticketPromedio,
+      unidades: round2(unidades),
+      costoFijoMensual: COSTO_FIJO_MENSUAL,
+    },
+    textos: {
+      diasTexto,
+      horasPico,
+      horasFlojas,
+      topFacturacionTexto,
+      topGananciaTexto,
+      categoriasTexto,
+    },
+  };
+};
+
 const analizarVentas = async (req, res) => {
   try {
     let desde = new Date();
     let hasta = new Date();
-    let dias = 90;
 
     if (req.query.desde && req.query.hasta) {
       const d1 = new Date(req.query.desde + 'T00:00:00');
@@ -484,151 +636,39 @@ const analizarVentas = async (req, res) => {
       desde.setHours(0, 0, 0, 0);
       hasta = d2;
       hasta.setHours(23, 59, 59, 999);
-      dias = Math.round((hasta - desde) / 86400000) + 1;
     } else {
-      dias = Math.min(Math.max(parseInt(req.query.dias) || 90, 1), 730);
+      let dias = Math.min(Math.max(parseInt(req.query.dias) || 90, 1), 730);
       desde.setDate(desde.getDate() - (dias - 1));
       desde.setHours(0, 0, 0, 0);
     }
 
-    const [sales, products] = await Promise.all([
-      Sale.find({ fecha: { $gte: desde, $lte: hasta }, estado: 'completada' })
-        .select('fecha items totalFinal')
-        .lean(),
-      Product.find({ activo: true }).populate('categoria', 'nombre').lean(),
-    ]);
-
-    const productMap = new Map(products.map((p) => [p._id.toString(), p]));
-    const diasSemana = DIAS_SEMANA.map((nombre, i) => ({ nombre, cerrado: DIAS_CERRADOS.includes(i), ventas: 0, facturacion: 0 }));
-    const horas = Array.from({ length: 24 }, (_, i) => ({ hora: i, ventas: 0, facturacion: 0 }));
-    const porProducto = new Map();
-    const porCategoria = new Map();
-
-    let totalVentas = 0;
-    let facturacion = 0;
-    let costo = 0;
-    let unidades = 0;
-
-    for (const sale of sales) {
-      const d = new Date(sale.fecha);
-      const dia = d.getDay();
-      const hora = d.getHours();
-
-      totalVentas++;
-      facturacion += sale.totalFinal || 0;
-      diasSemana[dia].ventas++;
-      diasSemana[dia].facturacion += sale.totalFinal || 0;
-      horas[hora].ventas++;
-      horas[hora].facturacion += sale.totalFinal || 0;
-
-      for (const item of (sale.items || [])) {
-        const pid = item.producto?.toString();
-        if (!pid) continue;
-        const itemCosto = (item.precioCompraHisto || 0) * (item.cantidad || 0);
-        costo += itemCosto;
-        unidades += item.cantidad || 0;
-
-        let agg = porProducto.get(pid);
-        if (!agg) { agg = { unidades: 0, facturacion: 0, costo: 0 }; porProducto.set(pid, agg); }
-        agg.unidades += item.cantidad || 0;
-        agg.facturacion += item.subtotal || 0;
-        agg.costo += itemCosto;
-
-        const product = productMap.get(pid);
-        const cat = product?.categoria?.nombre || 'Sin categoría';
-        let catAgg = porCategoria.get(cat);
-        if (!catAgg) { catAgg = { unidades: 0, facturacion: 0, costo: 0 }; porCategoria.set(cat, catAgg); }
-        catAgg.unidades += item.cantidad || 0;
-        catAgg.facturacion += item.subtotal || 0;
-        catAgg.costo += itemCosto;
-      }
-    }
-
-    const round2 = (n) => Math.round((n || 0) * 100) / 100;
-
-    const productosData = [...porProducto.entries()].map(([pid, agg]) => {
-      const product = productMap.get(pid);
-      const ganancia = agg.facturacion - agg.costo;
-      return {
-        id: pid,
-        nombre: product?.nombre || 'Producto eliminado',
-        sku: product?.sku || '',
-        categoria: product?.categoria?.nombre || 'Sin categoría',
-        unidadMedida: product?.unidadMedida || 'unidad',
-        precioVenta: product?.precioVenta || 0,
-        precioCompra: product?.precioCompra || 0,
-        stock: product?.stock ?? 0,
-        stockMinimo: product?.stockMinimo ?? 0,
-        necesitaReponer: product ? product.stock <= product.stockMinimo : false,
-        unidades: round2(agg.unidades),
-        facturacion: round2(agg.facturacion),
-        costo: round2(agg.costo),
-        ganancia: round2(ganancia),
-        margenPct: agg.facturacion > 0 ? Math.round((ganancia / agg.facturacion) * 100) : 0,
-      };
-    }).sort((a, b) => b.facturacion - a.facturacion);
-
-    const categoriasData = [...porCategoria.entries()].map(([nombre, agg]) => ({
-      nombre,
-      unidades: round2(agg.unidades),
-      facturacion: round2(agg.facturacion),
-      costo: round2(agg.costo),
-      ganancia: round2(agg.facturacion - agg.costo),
-      margenPct: agg.facturacion > 0 ? Math.round(((agg.facturacion - agg.costo) / agg.facturacion) * 100) : 0,
-    })).sort((a, b) => b.facturacion - a.facturacion);
-
-    const gananciaTotal = facturacion - costo;
-    const margenGlobal = facturacion > 0 ? Math.round((gananciaTotal / facturacion) * 100) : 0;
-    const ticketPromedio = totalVentas > 0 ? Math.round(facturacion / totalVentas) : 0;
-
-    const topFacturacion = productosData.slice(0, 15);
-    const topGanancia = [...productosData].sort((a, b) => b.ganancia - a.ganancia).slice(0, 10);
-
-    const diasTexto = diasSemana
-      .map((d) => `- ${d.nombre}${d.cerrado ? ' (CERRADO)' : ''}: ${formatMoney(d.facturacion)} / ${d.ventas} ventas`)
-      .join('\n');
-
-    const topHoras = [...horas].sort((a, b) => b.facturacion - a.facturacion).filter((h) => h.ventas > 0);
-    const horasPico = topHoras.slice(0, 4).map((h) => `- ${String(h.hora).padStart(2, '0')}:00 hs → ${formatMoney(h.facturacion)} en ${h.ventas} ventas`).join('\n') || '- sin datos';
-    const horasFlojas = topHoras.slice(-3).map((h) => `- ${String(h.hora).padStart(2, '0')}:00 hs → ${formatMoney(h.facturacion)} en ${h.ventas} ventas`).join('\n') || '- sin datos';
-
-    const topFacturacionTexto = topFacturacion.map((p) =>
-      `- ${p.nombre} (${p.categoria}): ${p.unidades} uds, ${formatMoney(p.facturacion)}, ganancia ${formatMoney(p.ganancia)} (${p.margenPct}%), stock ${p.stock}${p.necesitaReponer ? ' (REPONER)' : ''}`
-    ).join('\n');
-
-    const topGananciaTexto = topGanancia.map((p) =>
-      `- ${p.nombre}: ganancia ${formatMoney(p.ganancia)} (${p.margenPct}%), vende ${p.unidades} uds, stock ${p.stock}`
-    ).join('\n');
-
-    const categoriasTexto = categoriasData.map((c) =>
-      `- ${c.nombre}: ${formatMoney(c.facturacion)} / ganancia ${formatMoney(c.ganancia)} (${c.margenPct}%)`
-    ).join('\n');
+    const { desde: dDesde, hasta: dHasta, dias, totalVentas, facturacion, costo, gananciaTotal, margenGlobal, ticketPromedio, resumen, diasSemana, horas, categorias, productos, textos } = await armarDatosVentas({ desde, hasta });
 
     const prompt = `Sos un analista financiero y experto en retail de mascotas en Argentina. Analizá el rendimiento de la tienda "Poroto PetShop".
 
-PERIODO: ${desde.toISOString().slice(0, 10)} hasta ${hasta.toISOString().slice(0, 10)} (${dias} días)
+PERIODO: ${dDesde.toISOString().slice(0, 10)} hasta ${dHasta.toISOString().slice(0, 10)} (${dias} días)
 VENTAS: ${totalVentas} | FACTURACIÓN: ${formatMoney(facturacion)} | COSTO MERCADERÍA: ${formatMoney(costo)} | GANANCIA ESTIMADA: ${formatMoney(gananciaTotal)} | MARGEN GLOBAL: ${margenGlobal}%
 TICKET PROMEDIO: ${formatMoney(ticketPromedio)} | COSTO FIJO ESTIMADO MENSUAL: ${formatMoney(COSTO_FIJO_MENSUAL)} (para evaluar rentabilidad)
 
 IMPORTANTE: el local está CERRADO los domingos (no abre). El Domingo va a figurar sin ventas por eso, salvo ventas excepcionales. NO lo consideres un "peor día", NO lo marques como problema y NO sugieras abrir los domingos.
 
 FACTURACIÓN POR DÍA DE SEMANA:
-${diasTexto}
+${textos.diasTexto}
 
 HORARIOS CON MÁS VENTA:
-${horasPico}
+${textos.horasPico}
 
 HORARIOS MÁS FLOJOS:
-${horasFlojas}
+${textos.horasFlojas}
 
 TOP PRODUCTOS POR FACTURACIÓN:
-${topFacturacionTexto || '- sin datos'}
+${textos.topFacturacionTexto || '- sin datos'}
 
 TOP PRODUCTOS POR GANANCIA:
-${topGananciaTexto || '- sin datos'}
+${textos.topGananciaTexto || '- sin datos'}
 
 RENTABILIDAD POR CATEGORÍA:
-${categoriasTexto || '- sin datos'}
+${textos.categoriasTexto || '- sin datos'}
 
 Respondé EXCLUSIVAMENTE con JSON válido (sin backticks, sin texto extra) en este formato:
 {
@@ -649,25 +689,16 @@ Respondé EXCLUSIVAMENTE con JSON válido (sin backticks, sin texto extra) en es
 
     const resultado = {
       period: {
-        desde: desde.toISOString().slice(0, 10),
-        hasta: hasta.toISOString().slice(0, 10),
+        desde: dDesde.toISOString().slice(0, 10),
+        hasta: dHasta.toISOString().slice(0, 10),
         dias,
       },
-      resumen: {
-        ventas: totalVentas,
-        facturacion: round2(facturacion),
-        costo: round2(costo),
-        ganancia: round2(gananciaTotal),
-        margenPct: margenGlobal,
-        ticketPromedio,
-        unidades: round2(unidades),
-        costoFijoMensual: COSTO_FIJO_MENSUAL,
-      },
+      resumen,
       diasCerrados: DIAS_CERRADOS.map((i) => DIAS_SEMANA[i]),
       diasSemana,
       horas: horas.filter((h) => h.ventas > 0),
-      categorias: categoriasData,
-      productos: productosData,
+      categorias,
+      productos,
       ia,
     };
 
@@ -686,6 +717,102 @@ Respondé EXCLUSIVAMENTE con JSON válido (sin backticks, sin texto extra) en es
   }
 };
 
+const consultarDatos = async (req, res) => {
+  try {
+    const pregunta = String(req.body.pregunta || '').trim();
+    if (!pregunta) {
+      return res.status(400).json({ message: 'Escribí una pregunta para consultar tus datos' });
+    }
+
+    let desde = new Date();
+    let hasta = new Date();
+
+    if (req.body.desde && req.body.hasta) {
+      const d1 = new Date(req.body.desde + 'T00:00:00');
+      const d2 = new Date(req.body.hasta + 'T00:00:00');
+      if (isNaN(d1) || isNaN(d2) || d2 < d1) {
+        return res.status(400).json({ message: 'Rango de fechas inválido' });
+      }
+      desde = d1;
+      desde.setHours(0, 0, 0, 0);
+      hasta = d2;
+      hasta.setHours(23, 59, 59, 999);
+    } else {
+      desde.setDate(desde.getDate() - 89);
+      desde.setHours(0, 0, 0, 0);
+    }
+
+    const { desde: dDesde, hasta: dHasta, dias, totalVentas, facturacion, costo, gananciaTotal, margenGlobal, ticketPromedio, textos } = await armarDatosVentas({ desde, hasta });
+
+    const prompt = `Sos un analista de datos de ventas y stock de la tienda "Poroto PetShop" (retail de mascotas en Argentina). Usás los datos reales que te pasan abajo para responder la pregunta del usuario.
+
+PERIODO: ${dDesde.toISOString().slice(0, 10)} hasta ${dHasta.toISOString().slice(0, 10)} (${dias} días)
+
+DATOS GLOBALES:
+- Ventas: ${totalVentas} | Facturación: ${formatMoney(facturacion)} | Costo mercadería: ${formatMoney(costo)} | Ganancia estimada: ${formatMoney(gananciaTotal)} (ganancia bruta sin restar costos fijos) | Margen global: ${margenGlobal}% | Ticket promedio: ${formatMoney(ticketPromedio)}
+
+IMPORTANTE: el local está CERRADO los domingos (no abre). El Domingo figura sin ventas por eso; NO lo marques como problema ni como día de baja performance.
+
+FACTURACIÓN POR DÍA DE SEMANA (con ventas y facturación):
+${textos.diasTexto}
+
+HORARIOS PICO:
+${textos.horasPico}
+
+HORARIOS FLOJOS:
+${textos.horasFlojas}
+
+TOP PRODUCTOS POR FACTURACIÓN (con unidades vendidas, ganancia, margen y stock para detectar reposición):
+${textos.topFacturacionTexto || '- sin datos'}
+
+TOP PRODUCTOS POR GANANCIA:
+${textos.topGananciaTexto || '- sin datos'}
+
+RENTABILIDAD POR CATEGORÍA:
+${textos.categoriasTexto || '- sin datos'}
+
+PREGUNTA DEL USUARIO: "${pregunta}"
+
+Respondé en español de Argentina, SOLO sobre lo que pregunta el USUARIO (no des un informe general del negocio). Usá siempre cifras reales de los datos provistos. Si el dato pedido no está disponible o no hay ventas en el período, decilo con claridad. Podés usar viñetas y saltos de línea si aportan.
+
+Respondé EXCLUSIVAMENTE con JSON válido (sin backticks, sin texto extra) en este formato:
+{
+  "respuesta": "respuesta clara y completa a la pregunta, citando números reales",
+  "datosClave": ["dato 1", "dato 2", "dato 3"]
+}
+NOTA: "datosClave" debe contener 2 a 4 cifras puntuales que respalden la respuesta (por ej. "$1.234.500 el Lunes", "52 ventas en total"); si no aplica, usa [].`;
+
+    const ia = await callOpenAI(
+      'Sos un analista de datos de ventas de un pet shop argentino. Respondés SIEMPRE y EXCLUSIVAMENTE con JSON válido.',
+      prompt
+    );
+
+    const resultado = {
+      period: {
+        desde: dDesde.toISOString().slice(0, 10),
+        hasta: dHasta.toISOString().slice(0, 10),
+        dias,
+      },
+      pregunta,
+      respuesta: ia.respuesta || '',
+      datosClave: Array.isArray(ia.datosClave) ? ia.datosClave : [],
+    };
+
+    res.json(resultado);
+
+    AIFeatureHistory.create({
+      tipo: 'consulta',
+      titulo: pregunta.slice(0, 80),
+      parametros: { desde: dDesde.toISOString().slice(0, 10), hasta: dHasta.toISOString().slice(0, 10), pregunta },
+      resultado,
+      empleado: req.user?._id,
+    }).catch(() => {});
+  } catch (error) {
+    console.error('Error consultar datos:', error);
+    res.status(500).json({ message: 'No se pudo responder la consulta. Reintentá en unos segundos.' });
+  }
+};
+
 module.exports = {
   analizarRestock,
   analizarPrecios,
@@ -695,4 +822,5 @@ module.exports = {
   chatbotCatalogo,
   crearComboProducto,
   analizarVentas,
+  consultarDatos,
 };

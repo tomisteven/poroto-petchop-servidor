@@ -53,6 +53,10 @@ const productSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    mostrarEnCatalogo: {
+      type: Boolean,
+      default: true,
+    },
     esBolsaAlimento: {
       type: Boolean,
       default: false,
@@ -63,6 +67,10 @@ const productSchema = new mongoose.Schema(
     },
     kilosPorBolsa: {
       type: Number,
+    },
+    gramosBolsaAbierta: {
+      type: Number,
+      default: 0,
     },
     precioKilo: {
       type: Number,

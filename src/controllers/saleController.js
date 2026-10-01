@@ -6,6 +6,7 @@ const StockMovement = require('../models/StockMovement');
 const Customer = require('../models/Customer');
 const generateTicketNumber = require('../utils/generateTicketNumber');
 const { calcularPuntos } = require('../utils/loyalty');
+const { consumirKilos, devolverKilos, estadoInicial } = require('../utils/bolsaStock');
 
 // @desc    Obtener todas las ventas
 // @route   GET /api/sales
@@ -91,6 +92,7 @@ const createSale = async (req, res) => {
     const saleItems = [];
     const stockMovements = [];
     const productsToUpdate = [];
+    const bagStates = new Map();
 
     // Validar stock y preparar items
     for (const item of items) {
@@ -191,9 +193,31 @@ if (item.kilosVendidos === undefined) {
              // Si solo mandaron cantidad (como kilos), este bloque no se usaría porque el front manda subtotal
              throw new Error(`Debe mandar el subtotal cobrado para venta suelta de: ${product.nombre}`);
          }
-         // La venta suelta NO descuenta stock del producto de bolsa, según requerimiento del usuario.
-         // El usuario maneja el stock de bolsas abiertas de forma externa o solo le interesa el stock de bolsas cerradas.
+         // La venta suelta se descuenta de la bolsa abierta en gramos.
+         // Al vaciarse una bolsa entera, se descuenta 1 del stock normal automáticamente.
          stockDeduction = 0;
+
+         let bag = bagStates.get(String(product._id));
+         if (!bag) {
+           bag = { ...estadoInicial(product), kilosPorBolsa: product.kilosPorBolsa, stockInicial: product.stock || 0 };
+           bagStates.set(String(product._id), bag);
+         }
+         const consumido = consumirKilos(bag, kilosVendidosCalculados);
+         bag.stock = consumido.stock;
+         bag.gramos = consumido.gramos;
+
+         for (const a of consumido.bolsasConsumidas) {
+           stockMovements.push({
+             producto: product._id,
+             tipo: 'venta',
+             cantidad: 1,
+             stockAnterior: a.stockAnterior,
+             stockNuevo: a.stockNuevo,
+             motivo: 'Venta suelta - bolsa consumida',
+             usuario: req.user._id,
+             __bolsaSuelta: true
+           });
+         }
       } else {
          itemSubtotal = product.precioVenta * item.cantidad;
          stockDeduction = item.cantidad;
@@ -242,6 +266,13 @@ if (item.kilosVendidos === undefined) {
       }
     }
 
+    for (const [pid, bag] of bagStates) {
+      const delta = bag.stock - bag.stockInicial;
+      const update = { $set: { gramosBolsaAbierta: bag.gramos } };
+      if (delta !== 0) update.$inc = { stock: delta };
+      productsToUpdate.push({ updateOne: { filter: { _id: pid }, update } });
+    }
+
     const discountAmount = descuento ? (subtotal * (descuento / 100)) : 0;
     const totalFinal = subtotal - discountAmount;
     const vuelto = montoPagado - totalFinal;
@@ -282,7 +313,13 @@ if (item.kilosVendidos === undefined) {
     }
 
     // Modificar los motivos de stock para incluir el nro de ticket
-    stockMovements.forEach(sm => sm.motivo = `Venta ${createdSale.numeroTicket}`);
+    stockMovements.forEach(sm => {
+      if (sm.__bolsaSuelta) {
+        sm.motivo = `Venta ${createdSale.numeroTicket} · bolsa suelta consumida`;
+      } else {
+        sm.motivo = `Venta ${createdSale.numeroTicket}`;
+      }
+    });
 
     await StockMovement.insertMany(stockMovements);
     await Product.bulkWrite(productsToUpdate);
@@ -310,6 +347,7 @@ const cancelSale = async (req, res) => {
 
     const stockMovements = [];
     const productsToUpdate = [];
+    const bagRestore = new Map();
 
     // Revertir inventario
     for (const item of sale.items) {
@@ -350,10 +388,32 @@ const cancelSale = async (req, res) => {
       const product = await Product.findById(item.producto);
       
       if (product) {
-        let stockRestored = item.cantidad;
         if (item.esVentaSuelta && product.esBolsaAlimento && product.kilosPorBolsa) {
-             stockRestored = (item.kilosVendidos || 0) / product.kilosPorBolsa;
+          let bag = bagRestore.get(String(product._id));
+          if (!bag) {
+            bag = { ...estadoInicial(product), kilosPorBolsa: product.kilosPorBolsa, stockInicial: product.stock || 0 };
+            bagRestore.set(String(product._id), bag);
+          }
+          const stockAnterior = bag.stock;
+          const devuelto = devolverKilos(bag, item.kilosVendidos || 0);
+          bag.stock = devuelto.stock;
+          bag.gramos = devuelto.gramos;
+
+          if (devuelto.bolsasDevueltas > 0) {
+            stockMovements.push({
+              producto: product._id,
+              tipo: 'ajuste',
+              cantidad: devuelto.bolsasDevueltas,
+              stockAnterior,
+              stockNuevo: devuelto.stock,
+              motivo: `Anulación de ticket ${sale.numeroTicket} · devolución de bolsa`,
+              usuario: req.user._id
+            });
+          }
+          continue;
         }
+
+        let stockRestored = item.cantidad;
 
         stockMovements.push({
           producto: product._id,
@@ -372,6 +432,13 @@ const cancelSale = async (req, res) => {
           }
         });
       }
+    }
+
+    for (const [pid, bag] of bagRestore) {
+      const delta = bag.stock - bag.stockInicial;
+      const update = { $set: { gramosBolsaAbierta: bag.gramos } };
+      if (delta !== 0) update.$inc = { stock: delta };
+      productsToUpdate.push({ updateOne: { filter: { _id: pid }, update } });
     }
 
     sale.estado = 'anulada';
@@ -446,6 +513,7 @@ const updateSale = async (req, res) => {
     // Mapa de precios/costos históricos de las líneas ya existentes (para no repreciar la venta)
     const oldByProduct = new Map();
     const oldConsumed = new Map();
+    const oldBolsa = new Map();
     for (const it of sale.items) {
       if (it.promocion) {
         oldByProduct.set(`promo:${String(it.promocion)}`, {
@@ -467,8 +535,11 @@ const updateSale = async (req, res) => {
           esVentaSuelta: it.esVentaSuelta,
         });
         const product = await Product.findById(it.producto);
-        if (product && it.esVentaSuelta && product.esBolsaAlimento && product.kilosPorBolsa) {
-          oldConsumed.set(String(it.producto), (oldConsumed.get(String(it.producto)) || 0) + ((it.kilosVendidos || 0) / product.kilosPorBolsa));
+        if (product && product.esBolsaAlimento) {
+          const rec = oldBolsa.get(String(it.producto)) || { sueltoKg: 0, bolsas: 0 };
+          if (it.esVentaSuelta) rec.sueltoKg += it.kilosVendidos || 0;
+          else rec.bolsas += it.cantidad;
+          oldBolsa.set(String(it.producto), rec);
         } else {
           oldConsumed.set(String(it.producto), (oldConsumed.get(String(it.producto)) || 0) + it.cantidad);
         }
@@ -476,6 +547,7 @@ const updateSale = async (req, res) => {
     }
 
     const newConsumed = new Map();
+    const newBolsa = new Map();
     const saleItems = [];
     let subtotal = 0;
 
@@ -542,7 +614,13 @@ const updateSale = async (req, res) => {
         }
 
         const itemSubtotal = unitPrice * item.cantidad;
-        newConsumed.set(String(product._id), (newConsumed.get(String(product._id)) || 0) + (kilosVendidosCalculados / product.kilosPorBolsa));
+        if (product.esBolsaAlimento) {
+          const rec = newBolsa.get(String(product._id)) || { sueltoKg: 0, bolsas: 0 };
+          rec.sueltoKg += kilosVendidosCalculados;
+          newBolsa.set(String(product._id), rec);
+        } else {
+          newConsumed.set(String(product._id), (newConsumed.get(String(product._id)) || 0) + (kilosVendidosCalculados / product.kilosPorBolsa));
+        }
 
         saleItems.push({
           producto: product._id,
@@ -565,7 +643,13 @@ const updateSale = async (req, res) => {
       }
 
       const itemSubtotal = unitPrice * item.cantidad;
-      newConsumed.set(String(product._id), (newConsumed.get(String(product._id)) || 0) + item.cantidad);
+      if (product.esBolsaAlimento) {
+        const rec = newBolsa.get(String(product._id)) || { sueltoKg: 0, bolsas: 0 };
+        rec.bolsas += item.cantidad;
+        newBolsa.set(String(product._id), rec);
+      } else {
+        newConsumed.set(String(product._id), (newConsumed.get(String(product._id)) || 0) + item.cantidad);
+      }
 
       saleItems.push({
         producto: product._id,
@@ -587,7 +671,8 @@ const updateSale = async (req, res) => {
     }
 
     // === Ajuste de stock por delta (devuelve lo quitado, descuenta lo agregado) ===
-    const productIds = new Set([...oldConsumed.keys(), ...newConsumed.keys()]);
+    const bolsaIds = new Set([...oldBolsa.keys(), ...newBolsa.keys()]);
+    const productIds = new Set([...oldConsumed.keys(), ...newConsumed.keys()].filter(id => !bolsaIds.has(id)));
     const stockMovements = [];
     const productsToUpdate = [];
 
@@ -623,6 +708,45 @@ const updateSale = async (req, res) => {
           usuario: req.user._id
         });
         productsToUpdate.push({ updateOne: { filter: { _id: product._id }, update: { $inc: { stock: amount } } } });
+      }
+    }
+
+    // === Productos de bolsa: recalcular gramos de la bolsa abierta y bolsas consumidas ===
+    const motivoBolsa = `Edición de ticket ${sale.numeroTicket}`;
+    for (const pid of bolsaIds) {
+      const product = await Product.findById(pid);
+      if (!product) continue;
+
+      const recOld = oldBolsa.get(pid) || { sueltoKg: 0, bolsas: 0 };
+      const recNew = newBolsa.get(pid) || { sueltoKg: 0, bolsas: 0 };
+      const oldUnit = oldConsumed.get(pid) || 0;
+      const newUnit = newConsumed.get(pid) || 0;
+
+      let bag = { ...estadoInicial(product), kilosPorBolsa: product.kilosPorBolsa };
+      const rev = devolverKilos(bag, recOld.sueltoKg);
+      bag.stock = rev.stock - recOld.bolsas - oldUnit;
+      bag.gramos = rev.gramos;
+      bag.stock -= recNew.bolsas + newUnit;
+      const cons = consumirKilos(bag, recNew.sueltoKg);
+      bag.stock = cons.stock;
+      bag.gramos = cons.gramos;
+
+      const stockDelta = bag.stock - (product.stock || 0);
+      if (stockDelta !== 0 || bag.gramos !== (Number(product.gramosBolsaAbierta) || 0)) {
+        const update = { $set: { gramosBolsaAbierta: bag.gramos } };
+        if (stockDelta !== 0) update.$inc = { stock: stockDelta };
+        productsToUpdate.push({ updateOne: { filter: { _id: pid }, update } });
+        if (stockDelta !== 0) {
+          stockMovements.push({
+            producto: pid,
+            tipo: stockDelta > 0 ? 'ajuste' : 'venta',
+            cantidad: Math.abs(stockDelta),
+            stockAnterior: product.stock,
+            stockNuevo: product.stock + stockDelta,
+            motivo: motivoBolsa,
+            usuario: req.user._id
+          });
+        }
       }
     }
 

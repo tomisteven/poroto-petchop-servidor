@@ -9,6 +9,7 @@ const {
   chatbotCatalogo,
   crearComboProducto,
   analizarVentas,
+  consultarDatos,
 } = require('../controllers/aiFeaturesController');
 const { protect } = require('../middlewares/auth');
 
@@ -18,6 +19,7 @@ router.get('/clientes-inactivos', protect, analizarClientesInactivos);
 router.get('/tendencias', protect, analizarTendencias);
 router.get('/promociones-ia', protect, generarPromocionesIA);
 router.get('/analisis-ventas', protect, analizarVentas);
+router.post('/preguntar', protect, consultarDatos);
 router.post('/crear-combo', crearComboProducto);
 router.post('/chatbot', chatbotCatalogo);
 

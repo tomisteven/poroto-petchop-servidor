@@ -11,6 +11,7 @@ const {
   bulkAction,
   getProductsWithoutMovement,
   getPublicCatalog,
+  abrirBolsa,
 } = require('../controllers/productController');
 const { protect, admin } = require('../middlewares/auth');
 
@@ -37,5 +38,8 @@ router.route('/:id')
 
 router.route('/:id/stock')
   .patch(protect, adjustStock);
+
+router.route('/:id/abrir-bolsa')
+  .post(protect, abrirBolsa);
 
 module.exports = router;
