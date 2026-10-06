@@ -11,4 +11,7 @@ const customerSchema = new mongoose.Schema({
   activo: { type: Boolean, default: true }
 }, { timestamps: true });
 
+customerSchema.index({ telefono: 1 });
+customerSchema.index({ nombre: 1 });
+
 module.exports = mongoose.model('Customer', customerSchema);

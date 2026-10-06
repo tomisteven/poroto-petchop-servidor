@@ -1090,6 +1090,60 @@ const getProductAnalysis = async (req, res) => {
   }
 };
 
+// @desc    Ultimas ventas del dashboard (detalle, cliente, costo y ganancia)
+// @route   GET /api/reports/latest-sales
+// @access  Private
+const getLatestSales = async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 5, 20);
+
+    const sales = await Sale.find({ estado: 'completada' })
+      .sort({ fecha: -1 })
+      .limit(limit)
+      .populate('cliente', 'nombre telefono esAfiliado')
+      .populate('items.producto', 'nombre')
+      .lean();
+
+    const ventas = (sales || []).map(v => {
+      const items = (v.items || []).map(i => ({
+        nombre: (i.producto && i.producto.nombre) || i.nombre || 'Producto',
+        cantidad: i.cantidad || 0,
+        kilosVendidos: i.kilosVendidos || null,
+        esVentaSuelta: i.esVentaSuelta || false,
+        subtotal: i.subtotal || 0,
+      }));
+
+      const costo = (v.items || []).reduce(
+        (acc, i) => acc + (i.precioCompraHisto || 0) * (i.cantidad || 0), 0
+      );
+
+      return {
+        _id: v._id,
+        numeroTicket: v.numeroTicket,
+        fecha: v.fecha,
+        metodoPago: v.metodoPago,
+        totalFinal: v.totalFinal || 0,
+        costo: Math.round(costo),
+        ganancia: Math.round((v.totalFinal || 0) - costo),
+        puntosGanados: v.puntosGanados || 0,
+        cliente: v.cliente && v.cliente._id
+          ? {
+              _id: v.cliente._id,
+              nombre: v.cliente.nombre,
+              telefono: v.cliente.telefono,
+              esAfiliado: v.cliente.esAfiliado || false,
+            }
+          : null,
+        items,
+      };
+    });
+
+    res.json(ventas);
+  } catch (error) {
+    res.status(500).json({ message: 'Error al obtener las ultimas ventas' });
+  }
+};
+
 module.exports = {
   getDailyReport,
   getWeeklyReport,
@@ -1104,4 +1158,5 @@ module.exports = {
   getCashFlow,
   getDashboardExtra,
   getProductAnalysis,
+  getLatestSales,
 };

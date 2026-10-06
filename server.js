@@ -41,20 +41,54 @@ connectDB();
 const app = express();
 
 // Middlewares
-const allowedOrigins = process.env.CLIENT_URL ? process.env.CLIENT_URL.split(',') : ['*'];
+const allowedOrigins = (process.env.CLIENT_URL || '')
+  .split(',')
+  .map(o => o.trim())
+  .filter(Boolean);
+
+const LOCAL_HOSTS = ['localhost', '127.0.0.1', '[::1]', '::1', '0.0.0.0'];
+
+const isPrivateHost = (hostname) =>
+  /^10\./.test(hostname) ||
+  /^192\.168\./.test(hostname) ||
+  /^172\.(1[6-9]|2\d|3[01])\./.test(hostname) ||
+  /\.local$/.test(hostname);
+
+const isAllowedOrigin = (origin) => {
+  // requests sin origin (curl, apps moviles, server-to-server)
+  if (!origin) return true;
+  if (allowedOrigins.includes('*')) return true;
+  if (allowedOrigins.includes(origin)) return true;
+
+  let parsed;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    return false;
+  }
+  const { hostname } = parsed;
+
+  // localhost / 127.0.0.1 / [::1] en cualquier puerto (dev)
+  if (LOCAL_HOSTS.includes(hostname)) return true;
+
+  // Misma maquina que los origenes configurados, aunque cambie el puerto
+  if (allowedOrigins.some(o => {
+    try { return new URL(o).hostname === hostname; } catch { return false; }
+  })) return true;
+
+  // IPs de la red local (para probar desde el celu) solo en desarrollo
+  if (process.env.NODE_ENV !== 'production' && isPrivateHost(hostname)) return true;
+
+  return false;
+};
 
 app.use(cors({
-  origin: (origin, callback) => {
-    // permitir requests sin origin (como apps móviles o curl)
-    if (!origin) return callback(null, true);
-    
-    if (allowedOrigins.indexOf(origin) !== -1 || allowedOrigins.includes('*')) {
-      callback(null, true);
-    } else {
-      callback(new Error('No permitido por CORS'));
-    }
-  },
-  credentials: true
+  // false = responde sin header Access-Control-Allow-Origin (el browser bloquea),
+  // en lugar de tirar una excepcion que rompia la respuesta con 500
+  origin: (origin, callback) => callback(null, isAllowedOrigin(origin)),
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(express.json({ limit: '10mb' })); // Para aceptar imágenes base64 si es necesario
 if (process.env.NODE_ENV !== 'production') {
