@@ -74,10 +74,23 @@ const getSaleById = async (req, res) => {
 // @access  Private
 const createSale = async (req, res) => {
   try {
-    const { items, descuento, metodoPago, montoPagado, cliente, notas } = req.body;
+    const { items, descuento, metodoPago, montoPagado, cliente, notas, fecha } = req.body;
 
     if (!items || items.length === 0) {
       return res.status(400).json({ message: 'No hay productos en la venta' });
+    }
+
+    // Fecha de venta retroactiva (ej: cargar ventas de un dia anterior)
+    let fechaVenta = null;
+    if (fecha) {
+      const parsed = new Date(fecha);
+      if (isNaN(parsed.getTime())) {
+        return res.status(400).json({ message: 'Fecha de venta inválida' });
+      }
+      if (parsed.getTime() > Date.now()) {
+        return res.status(400).json({ message: 'No se puede registrar una venta en el futuro' });
+      }
+      fechaVenta = parsed;
     }
 
     let customerDoc = null;
@@ -287,6 +300,7 @@ if (item.kilosVendidos === undefined) {
 
     const sale = new Sale({
       numeroTicket,
+      fecha: fechaVenta || undefined,
       empleado: req.user._id,
       cliente: customerDoc?._id,
       puntosGanados,
@@ -507,7 +521,7 @@ const updateSale = async (req, res) => {
     if (!sale) throw new Error('Venta no encontrada');
     if (sale.estado !== 'completada') throw new Error('Solo se pueden editar ventas completadas');
 
-    const { items, descuento, metodoPago, montoPagado, notas } = req.body;
+    const { items, descuento, metodoPago, montoPagado, notas, fecha } = req.body;
     if (!items || items.length === 0) throw new Error('No hay productos en la venta editada');
 
     // Mapa de precios/costos históricos de las líneas ya existentes (para no repreciar la venta)
@@ -763,6 +777,14 @@ const updateSale = async (req, res) => {
     sale.vuelto = vuelto < 0 ? 0 : vuelto;
     sale.puntosGanados = puntosNuevos;
     if (notas !== undefined) sale.notas = notas || undefined;
+
+    if (fecha) {
+      const parsed = new Date(fecha);
+      if (isNaN(parsed.getTime())) throw new Error('Fecha de venta inválida');
+      if (parsed.getTime() > Date.now()) throw new Error('No se puede registrar una venta en el futuro');
+      sale.fecha = parsed;
+    }
+
     await sale.save();
 
     if (sale.cliente && puntosDelta !== 0) {

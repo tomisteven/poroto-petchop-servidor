@@ -197,6 +197,22 @@ const getUnreadCount = async (req, res) => {
   }
 };
 
+// @desc    Listar pedidos no leídos (para la notificación del dashboard)
+// @route   GET /api/orders/unread-list
+// @access  Private
+const getUnreadOrders = async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 5, 10);
+    const orders = await Order.find({ leido: false })
+      .populate('cliente', 'nombre telefono')
+      .sort({ createdAt: -1 })
+      .limit(limit);
+    res.json(orders);
+  } catch (error) {
+    res.status(500).json({ message: 'Error' });
+  }
+};
+
 module.exports = {
   createPublicOrder,
   getOrders,
@@ -205,4 +221,5 @@ module.exports = {
   markAsRead,
   markWhatsappSent,
   getUnreadCount,
+  getUnreadOrders,
 };

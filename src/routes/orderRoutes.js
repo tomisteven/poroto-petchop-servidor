@@ -8,11 +8,13 @@ const {
   markAsRead,
   markWhatsappSent,
   getUnreadCount,
+  getUnreadOrders,
 } = require('../controllers/orderController');
 const { protect } = require('../middlewares/auth');
 
 router.post('/public', createPublicOrder);
 router.get('/unread-count', protect, getUnreadCount);
+router.get('/unread-list', protect, getUnreadOrders);
 router.get('/', protect, getOrders);
 router.get('/:id', protect, getOrder);
 router.patch('/:id/estado', protect, updateOrderStatus);
