@@ -77,8 +77,25 @@ const saleSchema = new mongoose.Schema(
     },
     metodoPago: {
       type: String,
-      enum: ['efectivo', 'tarjeta', 'transferencia'],
+      enum: ['efectivo', 'tarjeta', 'tarjeta_debito', 'transferencia'],
       required: true,
+    },
+    // Deducciones del medio de pago que absorbe el comercio (no cambian el precio al cliente)
+    retencionIIBB: {
+      type: Number,
+      default: 0,
+    },
+    comisionMP: {
+      type: Number,
+      default: 0,
+    },
+    impuestosPago: {
+      type: Number,
+      default: 0,
+    },
+    totalNeto: {
+      type: Number,
+      default: 0,
     },
     montoPagado: {
       type: Number,

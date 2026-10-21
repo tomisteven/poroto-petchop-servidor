@@ -7,6 +7,7 @@ const Customer = require('../models/Customer');
 const generateTicketNumber = require('../utils/generateTicketNumber');
 const { calcularPuntos } = require('../utils/loyalty');
 const { consumirKilos, devolverKilos, estadoInicial } = require('../utils/bolsaStock');
+const { calcularDeduccionesPago } = require('../config/paymentFees');
 
 // @desc    Obtener todas las ventas
 // @route   GET /api/sales
@@ -298,6 +299,8 @@ if (item.kilosVendidos === undefined) {
 
     const puntosGanados = customerDoc ? await calcularPuntos(totalFinal) : 0;
 
+    const deducciones = calcularDeduccionesPago(metodoPago, totalFinal);
+
     const sale = new Sale({
       numeroTicket,
       fecha: fechaVenta || undefined,
@@ -311,6 +314,10 @@ if (item.kilosVendidos === undefined) {
       metodoPago,
       montoPagado,
       vuelto: vuelto < 0 ? 0 : vuelto,
+      retencionIIBB: deducciones.retencionIIBB,
+      comisionMP: deducciones.comisionMP,
+      impuestosPago: deducciones.impuestosPago,
+      totalNeto: deducciones.totalNeto,
       estado: 'completada',
       notas: notas || undefined
     });
@@ -777,6 +784,12 @@ const updateSale = async (req, res) => {
     sale.vuelto = vuelto < 0 ? 0 : vuelto;
     sale.puntosGanados = puntosNuevos;
     if (notas !== undefined) sale.notas = notas || undefined;
+
+    const deducciones = calcularDeduccionesPago(metodoPago, totalFinal);
+    sale.retencionIIBB = deducciones.retencionIIBB;
+    sale.comisionMP = deducciones.comisionMP;
+    sale.impuestosPago = deducciones.impuestosPago;
+    sale.totalNeto = deducciones.totalNeto;
 
     if (fecha) {
       const parsed = new Date(fecha);

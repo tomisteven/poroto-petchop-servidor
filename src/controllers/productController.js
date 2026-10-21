@@ -234,7 +234,7 @@ const updateProduct = async (req, res) => {
       if (req.body.stockMinimo !== undefined) product.stockMinimo = req.body.stockMinimo;
       product.unidadMedida = req.body.unidadMedida || product.unidadMedida;
       product.proveedor = req.body.proveedor || product.proveedor;
-      product.imagen = req.body.imagen || product.imagen;
+      if (req.body.imagen !== undefined) product.imagen = req.body.imagen;
       if (req.body.esBolsaAlimento !== undefined) product.esBolsaAlimento = req.body.esBolsaAlimento;
       if (req.body.kilosPorBolsa !== undefined) product.kilosPorBolsa = req.body.kilosPorBolsa;
       if (req.body.precioKilo !== undefined) product.precioKilo = req.body.precioKilo;

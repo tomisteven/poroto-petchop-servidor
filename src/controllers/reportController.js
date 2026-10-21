@@ -78,6 +78,7 @@ const buildReportAggregation = async (startDate, endDate, groupByFormat) => {
         totalFinal: { $first: '$totalFinal' },
         metodoPago: { $first: '$metodoPago' },
         fecha: { $first: '$fecha' },
+        impuestosVenta: { $first: { $ifNull: ['$impuestosPago', 0] } },
         costoVenta: { $sum: { $multiply: ['$items.precioCompraHisto', '$items.cantidad'] } }
       }
     },
@@ -86,7 +87,8 @@ const buildReportAggregation = async (startDate, endDate, groupByFormat) => {
         _id: groupByFormat ? { $dateToString: { format: groupByFormat, date: '$fecha' } } : null,
         totalVentas: { $sum: 1 },
         montoTotal: { $sum: '$totalFinal' },
-        costoTotal: { $sum: '$costoVenta' }
+        costoTotal: { $sum: '$costoVenta' },
+        impuestosTotal: { $sum: '$impuestosVenta' }
       }
     },
     {
@@ -94,7 +96,8 @@ const buildReportAggregation = async (startDate, endDate, groupByFormat) => {
         totalVentas: 1,
         montoTotal: 1,
         costoTotal: 1,
-        gananciaNeta: { $subtract: ['$montoTotal', '$costoTotal'] },
+        impuestosTotal: 1,
+        gananciaNeta: { $subtract: [{ $subtract: ['$montoTotal', '$costoTotal'] }, '$impuestosTotal'] },
         ticketPromedio: { $divide: ['$montoTotal', { $cond: [{ $eq: ['$totalVentas', 0] }, 1, '$totalVentas'] }] }
       }
     },
@@ -129,14 +132,16 @@ const getReport = async (req, res, period, groupByFormat) => {
     let totalVentas = 0;
     let montoTotal = 0;
     let costoTotal = 0;
+    let impuestosTotal = 0;
 
     stats.timeline.forEach(t => {
       totalVentas += t.totalVentas;
       montoTotal += t.montoTotal;
       costoTotal += t.costoTotal;
+      impuestosTotal += t.impuestosTotal || 0;
     });
 
-    const gananciaNeta = montoTotal - costoTotal;
+    const gananciaNeta = montoTotal - costoTotal - impuestosTotal;
     const ticketPromedio = totalVentas > 0 ? montoTotal / totalVentas : 0;
 
     res.json({
@@ -145,6 +150,7 @@ const getReport = async (req, res, period, groupByFormat) => {
         totalVentas,
         montoTotal,
         costoTotal,
+        impuestosTotal,
         gananciaNeta,
         ticketPromedio
       },
@@ -243,6 +249,7 @@ const getDashboardSummary = async (req, res) => {
         $group: {
           _id: '$_id',
           totalFinal: { $first: '$totalFinal' },
+          impuestosVenta: { $first: { $ifNull: ['$impuestosPago', 0] } },
           costoVenta: { $sum: { $multiply: ['$items.precioCompraHisto', '$items.cantidad'] } }
         }
       },
@@ -251,13 +258,14 @@ const getDashboardSummary = async (req, res) => {
           _id: null,
           totalVentas: { $sum: 1 },
           montoTotal: { $sum: '$totalFinal' },
-          costoTotal: { $sum: '$costoVenta' }
+          costoTotal: { $sum: '$costoVenta' },
+          impuestosTotal: { $sum: '$impuestosVenta' }
         }
       }
     ]);
 
-    const stats = dailyStats[0] || { totalVentas: 0, montoTotal: 0, costoTotal: 0 };
-    const gananciaHoy = stats.montoTotal - stats.costoTotal;
+    const stats = dailyStats[0] || { totalVentas: 0, montoTotal: 0, costoTotal: 0, impuestosTotal: 0 };
+    const gananciaHoy = stats.montoTotal - stats.costoTotal - (stats.impuestosTotal || 0);
 
     // Obtener productos mas vendidos de hoy
     const topToday = await Sale.aggregate([
@@ -317,6 +325,7 @@ const getDashboardSummary = async (req, res) => {
         $group: {
           _id: '$_id',
           totalFinal: { $first: '$totalFinal' },
+          impuestosVenta: { $first: { $ifNull: ['$impuestosPago', 0] } },
           costoVenta: { $sum: { $multiply: ['$items.precioCompraHisto', '$items.cantidad'] } }
         }
       },
@@ -325,12 +334,13 @@ const getDashboardSummary = async (req, res) => {
           _id: null,
           totalVentas: { $sum: 1 },
           montoTotal: { $sum: '$totalFinal' },
-          costoTotal: { $sum: '$costoVenta' }
+          costoTotal: { $sum: '$costoVenta' },
+          impuestosTotal: { $sum: '$impuestosVenta' }
         }
       }
     ]);
 
-    const mStats = monthlyStats[0] || { totalVentas: 0, montoTotal: 0, costoTotal: 0 };
+    const mStats = monthlyStats[0] || { totalVentas: 0, montoTotal: 0, costoTotal: 0, impuestosTotal: 0 };
 
     // Gastos de hoy (se descuentan del ticket de facturacion)
     const gastosHoyAgg = await Expense.aggregate([
@@ -343,6 +353,7 @@ const getDashboardSummary = async (req, res) => {
       ventasHoy: stats.totalVentas,
       facturacionHoy: stats.montoTotal,
       gananciaHoy,
+      impuestosHoy: stats.impuestosTotal || 0,
       gastosHoy,
       facturacionNetaHoy: stats.montoTotal - gastosHoy,
       topProducts: topToday,
@@ -350,7 +361,8 @@ const getDashboardSummary = async (req, res) => {
       mes: {
         ventas: mStats.totalVentas,
         facturacion: mStats.montoTotal,
-        ganancia: mStats.montoTotal - mStats.costoTotal
+        impuestos: mStats.impuestosTotal || 0,
+        ganancia: mStats.montoTotal - mStats.costoTotal - (mStats.impuestosTotal || 0)
       }
     });
   } catch (error) {
@@ -416,6 +428,7 @@ const getGlobalStats = async (req, res) => {
         $group: {
           _id: '$_id',
           totalFinal: { $first: '$totalFinal' },
+          impuestosVenta: { $first: { $ifNull: ['$impuestosPago', 0] } },
           totalCosto: { $sum: { $multiply: ['$items.precioCompraHisto', '$items.cantidad'] } }
         }
       },
@@ -424,12 +437,13 @@ const getGlobalStats = async (req, res) => {
           _id: null,
           count: { $sum: 1 },
           billing: { $sum: '$totalFinal' },
-          cost: { $sum: '$totalCosto' }
+          cost: { $sum: '$totalCosto' },
+          taxes: { $sum: '$impuestosVenta' }
         }
       }
     ]);
 
-    const stats = saleStats[0] || { count: 0, billing: 0, cost: 0 };
+    const stats = saleStats[0] || { count: 0, billing: 0, cost: 0, taxes: 0 };
 
     res.json({
       productos: {
@@ -441,7 +455,8 @@ const getGlobalStats = async (req, res) => {
       ventas: {
         totalCount: stats.count,
         facturacionTotal: stats.billing,
-        gananciaTotal: stats.billing - stats.cost
+        impuestosTotal: stats.taxes || 0,
+        gananciaTotal: stats.billing - stats.cost - (stats.taxes || 0)
       }
     });
   } catch (error) {
@@ -556,6 +571,7 @@ const getSalesStats = async (req, res) => {
         $group: {
           _id: '$_id',
           totalFinal: { $first: '$totalFinal' },
+          impuestosVenta: { $first: { $ifNull: ['$impuestosPago', 0] } },
           costoVenta: { $sum: { $multiply: ['$items.precioCompraHisto', '$items.cantidad'] } }
         }
       },
@@ -564,12 +580,13 @@ const getSalesStats = async (req, res) => {
           _id: null,
           totalVentas: { $sum: 1 },
           montoTotal: { $sum: '$totalFinal' },
-          costoTotal: { $sum: '$costoVenta' }
+          costoTotal: { $sum: '$costoVenta' },
+          impuestosTotal: { $sum: '$impuestosVenta' }
         }
       }
     ]);
 
-    const summary = totalSummary[0] || { totalVentas: 0, montoTotal: 0, costoTotal: 0 };
+    const summary = totalSummary[0] || { totalVentas: 0, montoTotal: 0, costoTotal: 0, impuestosTotal: 0 };
     const productosConVentas = productSales.filter(p => p.cantidadVendida > 0).length;
 
     res.json({
@@ -577,8 +594,9 @@ const getSalesStats = async (req, res) => {
         totalVentas: summary.totalVentas,
         facturacionTotal: summary.montoTotal,
         costoTotal: summary.costoTotal,
-        gananciaTotal: summary.montoTotal - summary.costoTotal,
-        margenGeneral: summary.montoTotal > 0 ? ((summary.montoTotal - summary.costoTotal) / summary.montoTotal * 100) : 0,
+        impuestosTotal: summary.impuestosTotal || 0,
+        gananciaTotal: summary.montoTotal - summary.costoTotal - (summary.impuestosTotal || 0),
+        margenGeneral: summary.montoTotal > 0 ? ((summary.montoTotal - summary.costoTotal - (summary.impuestosTotal || 0)) / summary.montoTotal * 100) : 0,
         totalProductos: productSales.length,
         productosConVentas
       },
@@ -616,6 +634,7 @@ const getSalesHeatmap = async (req, res) => {
           totalFinal: { $first: '$totalFinal' },
           fecha: { $first: '$fecha' },
           metodoPago: { $first: '$metodoPago' },
+          impuestosVenta: { $first: { $ifNull: ['$impuestosPago', 0] } },
           costoVenta: { $sum: { $multiply: ['$items.precioCompraHisto', '$items.cantidad'] } }
         }
       },
@@ -624,8 +643,10 @@ const getSalesHeatmap = async (req, res) => {
           _id: { $dateToString: { format: "%Y-%m-%d", date: "$fecha", timezone: "America/Argentina/Buenos_Aires" } },
           total: { $sum: '$totalFinal' },
           costo: { $sum: '$costoVenta' },
+          impuestos: { $sum: '$impuestosVenta' },
           efectivo: { $sum: { $cond: [{ $eq: ['$metodoPago', 'efectivo'] }, '$totalFinal', 0] } },
           tarjeta: { $sum: { $cond: [{ $eq: ['$metodoPago', 'tarjeta'] }, '$totalFinal', 0] } },
+          tarjetaDebito: { $sum: { $cond: [{ $eq: ['$metodoPago', 'tarjeta_debito'] }, '$totalFinal', 0] } },
           transferencia: { $sum: { $cond: [{ $eq: ['$metodoPago', 'transferencia'] }, '$totalFinal', 0] } }
         }
       },
@@ -634,9 +655,11 @@ const getSalesHeatmap = async (req, res) => {
           _id: 0,
           date: '$_id',
           total: 1,
-          profit: { $subtract: ['$total', '$costo'] },
+          profit: { $subtract: [{ $subtract: ['$total', '$costo'] }, '$impuestos'] },
+          impuestos: 1,
           efectivo: 1,
           tarjeta: 1,
+          tarjetaDebito: 1,
           transferencia: 1
         }
       },
@@ -669,6 +692,7 @@ const getCashClose = async (req, res) => {
           metodoPago: { $first: '$metodoPago' },
           montoPagado: { $first: '$montoPagado' },
           vuelto: { $first: '$vuelto' },
+          impuestosVenta: { $first: { $ifNull: ['$impuestosPago', 0] } },
           costoVenta: { $sum: { $multiply: ['$items.precioCompraHisto', '$items.cantidad'] } }
         }
       },
@@ -678,8 +702,10 @@ const getCashClose = async (req, res) => {
           totalVentas: { $sum: 1 },
           montoTotal: { $sum: '$totalFinal' },
           costoTotal: { $sum: '$costoVenta' },
+          impuestosTotal: { $sum: '$impuestosVenta' },
           efectivo: { $sum: { $cond: [{ $eq: ['$metodoPago', 'efectivo'] }, '$totalFinal', 0] } },
           tarjeta: { $sum: { $cond: [{ $eq: ['$metodoPago', 'tarjeta'] }, '$totalFinal', 0] } },
+          tarjeta_debito: { $sum: { $cond: [{ $eq: ['$metodoPago', 'tarjeta_debito'] }, '$totalFinal', 0] } },
           transferencia: { $sum: { $cond: [{ $eq: ['$metodoPago', 'transferencia'] }, '$totalFinal', 0] } },
           efectivoPagado: { $sum: { $cond: [{ $eq: ['$metodoPago', 'efectivo'] }, { $ifNull: ['$montoPagado', '$totalFinal'] }, 0] } },
           efectivoVuelto: { $sum: { $cond: [{ $eq: ['$metodoPago', 'efectivo'] }, { $ifNull: ['$vuelto', 0] }, 0] } }
@@ -687,7 +713,7 @@ const getCashClose = async (req, res) => {
       }
     ]);
 
-    const v = ventas[0] || { totalVentas: 0, montoTotal: 0, costoTotal: 0, efectivo: 0, tarjeta: 0, transferencia: 0, efectivoPagado: 0, efectivoVuelto: 0 };
+    const v = ventas[0] || { totalVentas: 0, montoTotal: 0, costoTotal: 0, impuestosTotal: 0, efectivo: 0, tarjeta: 0, tarjeta_debito: 0, transferencia: 0, efectivoPagado: 0, efectivoVuelto: 0 };
 
     const gastos = await Expense.aggregate([
       { $match: { fecha: { $gte: start, $lte: end } } },
@@ -703,7 +729,7 @@ const getCashClose = async (req, res) => {
 
     const totalGastos = gastos.reduce((acc, g) => acc + g.total, 0);
     const gananciaBruta = v.montoTotal - v.costoTotal;
-    const balanceNeto = gananciaBruta - totalGastos;
+    const balanceNeto = gananciaBruta - (v.impuestosTotal || 0) - totalGastos;
     const efectivoEnCaja = v.efectivoPagado - v.efectivoVuelto;
 
     res.json({
@@ -714,6 +740,7 @@ const getCashClose = async (req, res) => {
         costoTotal: v.costoTotal,
         efectivo: v.efectivo,
         tarjeta: v.tarjeta,
+        tarjeta_debito: v.tarjeta_debito,
         transferencia: v.transferencia,
         efectivoEnCaja,
       },
@@ -722,6 +749,7 @@ const getCashClose = async (req, res) => {
         porCategoria: gastos,
       },
       gananciaBruta,
+      impuestos: v.impuestosTotal || 0,
       balanceNeto,
     });
   } catch (error) {
@@ -750,6 +778,7 @@ const getCashFlow = async (req, res) => {
           fecha: { $first: '$fecha' },
           totalFinal: { $first: '$totalFinal' },
           metodoPago: { $first: '$metodoPago' },
+          impuestosVenta: { $first: { $ifNull: ['$impuestosPago', 0] } },
           costoVenta: { $sum: { $multiply: ['$items.precioCompraHisto', '$items.cantidad'] } }
         }
       },
@@ -759,8 +788,10 @@ const getCashFlow = async (req, res) => {
           ventas: { $sum: 1 },
           ingresos: { $sum: '$totalFinal' },
           costoVentas: { $sum: '$costoVenta' },
+          impuestos: { $sum: '$impuestosVenta' },
           efectivo: { $sum: { $cond: [{ $eq: ['$metodoPago', 'efectivo'] }, '$totalFinal', 0] } },
           tarjeta: { $sum: { $cond: [{ $eq: ['$metodoPago', 'tarjeta'] }, '$totalFinal', 0] } },
+          tarjeta_debito: { $sum: { $cond: [{ $eq: ['$metodoPago', 'tarjeta_debito'] }, '$totalFinal', 0] } },
           transferencia: { $sum: { $cond: [{ $eq: ['$metodoPago', 'transferencia'] }, '$totalFinal', 0] } }
         }
       },
@@ -786,6 +817,7 @@ const getCashFlow = async (req, res) => {
     let totalIngresos = 0;
     let totalGastos = 0;
     let totalVentas = 0;
+    let totalImpuestos = 0;
 
     for (let d = 1; d <= daysInMonth; d++) {
       const key = `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
@@ -793,23 +825,27 @@ const getCashFlow = async (req, res) => {
       const gasto = gastosMap[key] || 0;
       const ingresos = venta?.ingresos || 0;
       const costoVentas = venta?.costoVentas || 0;
-      const ganancia = ingresos - costoVentas;
+      const impuestos = venta?.impuestos || 0;
+      const ganancia = ingresos - costoVentas - impuestos;
       const balance = ganancia - gasto;
 
       totalIngresos += ingresos;
       totalGastos += gasto;
       totalVentas += venta?.ventas || 0;
+      totalImpuestos += impuestos;
 
       dias.push({
         fecha: key,
         ventas: venta?.ventas || 0,
         ingresos,
         costoVentas,
+        impuestos,
         ganancia,
         gastos: gasto,
         balance,
         efectivo: venta?.efectivo || 0,
         tarjeta: venta?.tarjeta || 0,
+        tarjeta_debito: venta?.tarjeta_debito || 0,
         transferencia: venta?.transferencia || 0,
       });
     }
@@ -819,7 +855,8 @@ const getCashFlow = async (req, res) => {
       totales: {
         ingresos: totalIngresos,
         gastos: totalGastos,
-        ganancia: totalIngresos - totalGastos,
+        impuestos: totalImpuestos,
+        ganancia: totalIngresos - totalGastos - totalImpuestos,
         ventas: totalVentas,
       },
       dias,
@@ -848,6 +885,7 @@ const getDashboardExtra = async (req, res) => {
             _id: '$_id',
             totalFinal: { $first: '$totalFinal' },
             fecha: { $first: '$fecha' },
+            impuestosVenta: { $first: { $ifNull: ['$impuestosPago', 0] } },
             costoVenta: { $sum: { $multiply: ['$items.precioCompraHisto', '$items.cantidad'] } }
           }
         },
@@ -856,6 +894,7 @@ const getDashboardExtra = async (req, res) => {
             _id: { $dateToString: { format: '%Y-%m', date: '$fecha', timezone: 'America/Argentina/Buenos_Aires' } },
             facturacion: { $sum: '$totalFinal' },
             costoVentas: { $sum: '$costoVenta' },
+            impuestos: { $sum: '$impuestosVenta' },
             tickets: { $sum: 1 }
           }
         }
@@ -876,16 +915,17 @@ const getDashboardExtra = async (req, res) => {
     for (let i = 11; i >= 0; i--) {
       const d = new Date(currentY, currentM - 1 - i, 1);
       const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-      const sale = monthlySales.find(s => s._id === key) || { facturacion: 0, costoVentas: 0, tickets: 0 };
+      const sale = monthlySales.find(s => s._id === key) || { facturacion: 0, costoVentas: 0, impuestos: 0, tickets: 0 };
       const exp = monthlyExpenses.find(e => e._id === key) || { gastos: 0 };
       historico.push({
         mes: key,
         nombre: monthLabels[d.getMonth()] + ' ' + String(d.getFullYear()).slice(2),
         facturacion: sale.facturacion,
         costoVentas: sale.costoVentas,
+        impuestos: sale.impuestos || 0,
         gananciaBruta: sale.facturacion - sale.costoVentas,
         gastos: exp.gastos,
-        gananciaNeta: sale.facturacion - sale.costoVentas - exp.gastos,
+        gananciaNeta: sale.facturacion - sale.costoVentas - (sale.impuestos || 0) - exp.gastos,
         tickets: sale.tickets
       });
     }
@@ -930,6 +970,7 @@ const getDashboardExtra = async (req, res) => {
         diasEnMes: daysInMonth,
         facturacion: currentMonthData.facturacion,
         gananciaBruta: currentMonthData.gananciaBruta,
+        impuestos: currentMonthData.impuestos || 0,
         gananciaNeta: currentMonthData.gananciaNeta,
         promedioDiario: avgDailyBilling,
         proyeccionFinMes: projectedBilling,
@@ -1116,6 +1157,7 @@ const getLatestSales = async (req, res) => {
       const costo = (v.items || []).reduce(
         (acc, i) => acc + (i.precioCompraHisto || 0) * (i.cantidad || 0), 0
       );
+      const impuestos = v.impuestosPago || 0;
 
       return {
         _id: v._id,
@@ -1124,7 +1166,8 @@ const getLatestSales = async (req, res) => {
         metodoPago: v.metodoPago,
         totalFinal: v.totalFinal || 0,
         costo: Math.round(costo),
-        ganancia: Math.round((v.totalFinal || 0) - costo),
+        impuestos: Math.round(impuestos),
+        ganancia: Math.round((v.totalFinal || 0) - costo - impuestos),
         puntosGanados: v.puntosGanados || 0,
         cliente: v.cliente && v.cliente._id
           ? {
@@ -1144,6 +1187,74 @@ const getLatestSales = async (req, res) => {
   }
 };
 
+// @desc    Impuestos/comisiones descontados por medio de pago (IIBB + Mercado Pago)
+// @route   GET /api/reports/taxes
+// @access  Private
+const getTaxes = async (req, res) => {
+  try {
+    const { date, year, month, period = 'monthly' } = req.query;
+    const p = ['daily', 'weekly', 'monthly', 'annual'].includes(period) ? period : 'monthly';
+    const { start, end } = getDateRange(p, date, year, month);
+
+    const match = { $match: { fecha: { $gte: start, $lte: end }, estado: 'completada' } };
+
+    const porMetodo = await Sale.aggregate([
+      match,
+      {
+        $group: {
+          _id: '$metodoPago',
+          facturacion: { $sum: '$totalFinal' },
+          retencionIIBB: { $sum: { $ifNull: ['$retencionIIBB', 0] } },
+          comisionMP: { $sum: { $ifNull: ['$comisionMP', 0] } },
+          impuestosTotal: { $sum: { $ifNull: ['$impuestosPago', 0] } },
+          ventas: { $sum: 1 }
+        }
+      },
+      { $sort: { impuestosTotal: -1 } }
+    ]);
+
+    const porDia = await Sale.aggregate([
+      match,
+      {
+        $group: {
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$fecha', timezone: 'America/Argentina/Buenos_Aires' } },
+          facturacion: { $sum: '$totalFinal' },
+          retencionIIBB: { $sum: { $ifNull: ['$retencionIIBB', 0] } },
+          comisionMP: { $sum: { $ifNull: ['$comisionMP', 0] } },
+          impuestosTotal: { $sum: { $ifNull: ['$impuestosPago', 0] } },
+          ventas: { $sum: 1 }
+        }
+      },
+      { $sort: { _id: 1 } }
+    ]);
+
+    const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+
+    const totales = porMetodo.reduce((acc, m) => ({
+      facturacion: acc.facturacion + m.facturacion,
+      retencionIIBB: acc.retencionIIBB + m.retencionIIBB,
+      comisionMP: acc.comisionMP + m.comisionMP,
+      impuestosTotal: acc.impuestosTotal + m.impuestosTotal,
+      ventas: acc.ventas + m.ventas
+    }), { facturacion: 0, retencionIIBB: 0, comisionMP: 0, impuestosTotal: 0, ventas: 0 });
+
+    totales.facturacion = round2(totales.facturacion);
+    totales.retencionIIBB = round2(totales.retencionIIBB);
+    totales.comisionMP = round2(totales.comisionMP);
+    totales.impuestosTotal = round2(totales.impuestosTotal);
+
+    res.json({
+      periodo: { start, end, tipo: p },
+      totales,
+      porMetodo,
+      porDia
+    });
+  } catch (error) {
+    console.error('Error taxes:', error);
+    res.status(500).json({ message: 'Error al obtener los impuestos de pago' });
+  }
+};
+
 module.exports = {
   getDailyReport,
   getWeeklyReport,
@@ -1159,4 +1270,5 @@ module.exports = {
   getDashboardExtra,
   getProductAnalysis,
   getLatestSales,
+  getTaxes,
 };
