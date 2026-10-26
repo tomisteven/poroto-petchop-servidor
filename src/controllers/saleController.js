@@ -233,7 +233,14 @@ if (item.kilosVendidos === undefined) {
            });
          }
       } else {
-         itemSubtotal = product.precioVenta * item.cantidad;
+         // Precio unitario personalizado para esta venta (sin modificar el precio del producto)
+         const customUnit = Number(item.precioUnitario);
+         if (item.precioUnitario !== undefined && item.precioUnitario !== null && Number.isFinite(customUnit) && customUnit >= 0) {
+            precioVentaHisto = customUnit;
+            itemSubtotal = customUnit * item.cantidad;
+         } else {
+            itemSubtotal = product.precioVenta * item.cantidad;
+         }
          stockDeduction = item.cantidad;
       }
 
