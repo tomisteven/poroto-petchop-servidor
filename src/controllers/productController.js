@@ -2,6 +2,7 @@ const Product = require('../models/Product');
 const StockMovement = require('../models/StockMovement');
 const Sale = require('../models/Sale');
 const Category = require('../models/Category');
+const { sincronizarProducto, sincronizarCatalogoCompleto } = require('../utils/sincronizacionEcommerce');
 
 const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -211,6 +212,13 @@ const createProduct = async (req, res) => {
       });
     }
 
+    // Sincronizar con tienda online
+    try {
+      await sincronizarProducto(product);
+    } catch (syncError) {
+      console.error('[ECOMMERCE] Error sincronizando producto creado:', syncError.message);
+    }
+
     res.status(201).json(product);
   } catch (error) {
     res.status(500).json({ message: 'Error al crear producto' });
@@ -259,12 +267,39 @@ const updateProduct = async (req, res) => {
       }
 
       const updatedProduct = await product.save();
+
+      // Sincronizar edición con tienda online
+      try {
+        await sincronizarProducto(updatedProduct);
+      } catch (syncError) {
+        console.error('[ECOMMERCE] Error sincronizando producto editado:', syncError.message);
+      }
+
       res.json(updatedProduct);
     } else {
       res.status(404).json({ message: 'Producto no encontrado' });
     }
   } catch (error) {
     res.status(500).json({ message: 'Error al actualizar producto' });
+  }
+};
+
+// Sincronizar catálogo completo con tienda online
+const sincronizarCatalogoCtrl = async (req, res) => {
+  try {
+    const productos = await Product.find({ activo: true })
+      .populate('categoria', 'nombre color')
+      .sort({ nombre: 1 });
+
+    const resultado = await sincronizarCatalogoCompleto(productos);
+
+    res.json({
+      message: 'Sincronización de catálogo completada',
+      total: productos.length,
+      ...resultado,
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Error al sincronizar catálogo: ' + error.message });
   }
 };
 
@@ -278,6 +313,14 @@ const deleteProduct = async (req, res) => {
     if (product) {
       product.activo = false;
       await product.save();
+
+      // Sincronizar desactivación con tienda online
+      try {
+        await sincronizarProducto(product);
+      } catch (syncError) {
+        console.error('[ECOMMERCE] Error sincronizando desactivación de producto:', syncError.message);
+      }
+
       res.json({ message: 'Producto desactivado' });
     } else {
       res.status(404).json({ message: 'Producto no encontrado' });
@@ -481,5 +524,6 @@ module.exports = {
   bulkAction,
   getProductsWithoutMovement,
   getPublicCatalog,
-  abrirBolsa
+  abrirBolsa,
+  sincronizarCatalogo: sincronizarCatalogoCtrl,
 };

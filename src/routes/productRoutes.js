@@ -12,6 +12,7 @@ const {
   getProductsWithoutMovement,
   getPublicCatalog,
   abrirBolsa,
+  sincronizarCatalogo,
 } = require('../controllers/productController');
 const { protect, admin } = require('../middlewares/auth');
 
@@ -30,6 +31,9 @@ router.route('/bulk-action')
 router.route('/')
   .get(protect, getProducts)
   .post(protect, admin, createProduct);
+
+router.route('/sincronizar-catalogo')
+  .get(protect, admin, sincronizarCatalogo);
 
 router.route('/:id')
   .get(protect, getProductById)

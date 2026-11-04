@@ -125,7 +125,7 @@ productSchema.methods.actualizarDisponibilidadCombo = async function () {
   const Product = this.constructor;
   const items = this.comboItems;
   let allAvailable = true;
-  
+
   for (const item of items) {
     const prod = await Product.findById(item.producto);
     const disponible = prod && prod.stock >= item.cantidad;
@@ -134,7 +134,7 @@ productSchema.methods.actualizarDisponibilidadCombo = async function () {
       allAvailable = false;
     }
   }
-  
+
   if (!allAvailable) {
     await this.save();
   }

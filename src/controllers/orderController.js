@@ -185,12 +185,12 @@ const markWhatsappSent = async (req, res) => {
   }
 };
 
-// @desc    Contar pedidos no leídos
+// @desc    Contar pedidos pendientes (el badge desaparece recién al confirmarlos)
 // @route   GET /api/orders/unread-count
 // @access  Private
 const getUnreadCount = async (req, res) => {
   try {
-    const count = await Order.countDocuments({ leido: false });
+    const count = await Order.countDocuments({ estado: 'pendiente' });
     res.json({ count });
   } catch (error) {
     res.status(500).json({ message: 'Error' });
